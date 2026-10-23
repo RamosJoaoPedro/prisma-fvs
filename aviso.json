@@ -1,5 +1,5 @@
 {
-  "manutencao": true,
-  "mensagem": "mexendo no Prisma até 9h10",
+  "manutencao": false,
+  "mensagem": "",
   "versaoMinima": "2.12"
 }
