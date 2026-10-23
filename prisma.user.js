@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Prisma - FVS no SGQ
 // @namespace    realiza-bot-fvs
-// @version      2.13
+// @version      2.14
 // @author       João Pedro Ramos
 // @description  Prisma: mapa das torres, fila de comandos, relatórios e preenchimento de FVS no SGQ da Realiza, com travas de segurança. Usa o login do próprio usuário no SGQ.
 // @match        https://gdol.sgq2.com.br/*
@@ -17,7 +17,7 @@
 
   // ============================== CONFIGURAÇÃO PADRÃO ==============================
   // Tudo aqui pode ser trocado pela aba "Configuração" do painel (fica salvo no navegador).
-  const VERSAO = '2.13';
+  const VERSAO = '2.14';
   const CANAL = 'oficial'; // 'oficial' ou 'teste' (o arquivo prisma-teste.user.js usa 'teste')
   const PADRAO = {
     obraNome: '', idObra: null,
@@ -273,6 +273,7 @@
   }
 
   // ---------------------------------- motor de gravação ----------------------------------
+  const podeAssumir = (nome) => CFG.exFuncionarios.some((n) => norm(nome).startsWith(norm(n)));
   const OK = (msg) => ({ resultado: 'OK', msg });
   const PEND = (msg) => ({ resultado: 'PENDENTE', msg });
 
@@ -322,14 +323,18 @@
 
     let verifs = await listarVerif(idS);
     let abertas = verifs.filter((i) => i.status === 0 || i.status === 3);
-    if (abertas.length > 1) {
+    let lista = null;
+    if (abertas.length > 1) { // confere todas antes de gravar qualquer uma
       const dt = (s) => s ? new Date(s).toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' }) : '?';
-      const desc = [];
-      for (const v of abertas.sort((x, y) => String(x.dataAbertura).localeCompare(String(y.dataAbertura)))) {
+      const bloq = [];
+      for (const v of abertas) {
         const d = ((await api('GET', '/obras/inspecoes-obra/' + v.idInspecaoObra)).j || {}).item || {};
-        desc.push(`aberta em ${dt(v.dataAbertura)} por ${(d.funcionarioInspecionado || 'ninguém').trim()}, ${totalPreenchido(v)}/${v.totalItens} itens`);
+        const dono = (d.funcionarioInspecionado || '').trim();
+        if (d.idFuncionarioInspecionado && d.idFuncionarioInspecionado !== CFG.idInspecionado && !(t.opc.assumir && podeAssumir(dono))) bloq.push(`aberta em ${dt(v.dataAbertura)} por ${dono}, ${totalPreenchido(v)}/${v.totalItens} itens`);
+        else if (!d.idFuncionarioInspecionado && totalPreenchido(v) > 0) bloq.push(`aberta em ${dt(v.dataAbertura)} sem inspetor e com itens marcados`);
       }
-      return PEND(`${abertas.length} verificações abertas: ` + desc.join(' | '));
+      if (bloq.length) return PEND(`${abertas.length} verificações abertas; não posso mexer em: ${[...new Set(bloq)].join(' | ')}. Para assumir, coloque o nome em Configuração → Assumir fichas de, e marque a opção no Mapa.`);
+      lista = abertas.slice().sort((x, y) => String(x.dataAbertura).localeCompare(String(y.dataAbertura)));
     }
     let V = abertas[0], criada = false;
     const naTxt = g.na.length ? 'NA ' + g.na.join(', ') : 'sem NA';
@@ -349,12 +354,27 @@
       V = abertas[0]; criada = true;
     }
 
+    // Uma ou várias verificações abertas da mesma FVS: preenche cada uma (o SGQ não deixa o usuário excluir duplicadas).
+    const alvos = lista || [V];
+    const res = [];
+    for (let k = 0; k < alvos.length; k++) {
+      const rr = await processarVerif(t, g, alvos[k], criada && k === 0, simular, naTxt, idS);
+      if (rr.resultado === 'PENDENTE') return PEND((alvos.length > 1 ? `verificação ${k + 1} de ${alvos.length}: ` : '') + rr.msg + (k && !simular ? ` (as ${k} anteriores já foram gravadas)` : ''));
+      res.push(rr.msg);
+    }
+    const junta = (alvos.length > 1 ? `${alvos.length} verificações abertas, todas tratadas: ` : '') + (() => { const c = new Map(); res.forEach((m) => c.set(m, (c.get(m) || 0) + 1)); return [...c].map(([m, n]) => n > 1 ? `${m} (×${n})` : m).join(' | '); })();
+    if (simular) return OK('SIMULAÇÃO: ' + junta + (t.acao === 'fechar' ? ' e finalizaria' : ''));
+    if (t.acao === 'abrir') return OK(junta);
+    return (await finalizarFvs(idS)) ? OK(junta + ' e FVS finalizada') : PEND(junta + ', mas deu erro ao finalizar a FVS');
+  }
+
+  async function processarVerif(t, g, V, criada, simular, naTxt, idS) {
     const det = ((await api('GET', '/obras/inspecoes-obra/' + V.idInspecaoObra)).j || {}).item;
     if (!det) return PEND('não consegui ler a verificação');
     let assumidaDe = '';
     if (det.idFuncionarioInspecionado && det.idFuncionarioInspecionado !== CFG.idInspecionado) {
-      const ex = CFG.exFuncionarios.some((n) => norm(det.funcionarioInspecionado).startsWith(norm(n)));
-      if (!(t.opc.assumir && ex)) return PEND('verificação aberta por ' + (det.funcionarioInspecionado || '').trim() + (ex ? ' (marque "assumir ex-funcionários")' : ''));
+      const ex = podeAssumir(det.funcionarioInspecionado);
+      if (!(t.opc.assumir && ex)) return PEND('verificação aberta por ' + (det.funcionarioInspecionado || '').trim() + (ex ? ' (marque "Assumir fichas de" no Mapa)' : ' (para assumir, coloque o nome em Configuração → Assumir fichas de)'));
       assumidaDe = (det.funcionarioInspecionado || '').trim();
     }
     if (!det.idFuncionarioInspecionado && !criada && totalPreenchido(V) > 0) return PEND('verificação com itens marcados e sem inspetor: conferir');
@@ -387,7 +407,7 @@
     }
     const trat = (t.opc.tratativa || '').trim() || CFG.tratativaPadrao;
     if (simular) {
-      return OK(`SIMULAÇÃO: ${assumidaDe ? 'assumiria a ficha de ' + assumidaDe + ', ' : ''}${aprov2.length ? 'aprovaria a 2ª inspeção de ' + lista2(aprov2) + ', ' : ''}${ocCriar.length ? 'criaria ' + ocCriar.length + ' ocorrência(s), ' : ''}${ocCompletar.length ? 'completaria ' + ocCompletar.length + ' ocorrência(s), ' : ''}preencheria ${preenchidos} itens e ${t.acao === 'abrir' ? 'deixaria iniciada' : 'encerraria em ' + fmt(t.dFechar) + ' e finalizaria'} (${naTxt})`);
+      return OK(`${assumidaDe ? 'assumiria a ficha de ' + assumidaDe + ', ' : ''}${aprov2.length ? 'aprovaria a 2ª inspeção de ' + lista2(aprov2) + ', ' : ''}${ocCriar.length ? 'criaria ' + ocCriar.length + ' ocorrência(s), ' : ''}${ocCompletar.length ? 'completaria ' + ocCompletar.length + ' ocorrência(s), ' : ''}preencheria ${preenchidos} itens e ${t.acao === 'abrir' ? 'deixaria iniciada' : 'encerraria em ' + fmt(t.dFechar)} (${naTxt})`);
     }
     for (const x of ocCriar) {
       const c = await api('POST', '/obras/inspecoes-obra/' + V.idInspecaoObra + '/ocorrencias/create', { idObra: CFG.idObra, idInspecaoObraItens: x.idInspecaoObraItens, inspecao: 1, descricao: CFG.descricaoPadrao + (x.descricao || '').trim(), dataDescricao: x.dataInspecao1 || isoDia(t.dAbrir), tratativa: trat, dataTratativa: isoDia(t.dFechar) });
@@ -404,16 +424,14 @@
     if (!dep) return PEND('salvou, mas não achei a verificação depois: conferir');
     if (dep.status !== alvo) return PEND('salvou, mas o status ficou ' + dep.status + ': conferir');
     const tot = totalPreenchido(dep);
-    if (t.acao === 'abrir') return OK(`${assumidaDe ? 'assumida de ' + assumidaDe + '; ' : ''}iniciada em ${fmt(t.dAbrir)}, ${tot}/${dep.totalItens} itens`);
+    if (t.acao === 'abrir') return OK(`${assumidaDe ? 'assumida de ' + assumidaDe + '; ' : ''}iniciada em ${fmt(t.dAbrir)}, ${Math.min(tot, dep.totalItens)}/${dep.totalItens} itens`);
     if (tot < dep.totalItens) return PEND(`encerrou com ${tot}/${dep.totalItens} itens: conferir`);
     if (aprov2.length) {
       const novos = ((await api('POST', '/obras/inspecoes-obra/' + V.idInspecaoObra + '/items', { page: 1, rowsPerPage: 300 })).j || {}).items || [];
       const falhou = aprov2.filter((a2) => (novos.find((n) => n.idInspecaoObraItens === a2.idInspecaoObraItens) || {}).inspecao2 !== 'A');
       if (falhou.length) return PEND('encerrou, mas a 2ª inspeção não gravou: conferir na tela (FVS não finalizada)');
     }
-    return (await finalizarFvs(idS))
-      ? OK(`${assumidaDe ? 'assumida de ' + assumidaDe + '; ' : ''}${aprov2.length ? '2ª inspeção aprovada; ' : ''}encerrada em ${fmt(t.dFechar)} (${tot}/${dep.totalItens}) e FVS finalizada`)
-      : PEND('verificação encerrada, mas erro ao finalizar a FVS');
+    return OK(`${assumidaDe ? 'assumida de ' + assumidaDe + '; ' : ''}${aprov2.length ? '2ª inspeção aprovada; ' : ''}encerrada em ${fmt(t.dFechar)} (${Math.min(tot, dep.totalItens)}/${dep.totalItens})`);
   }
 
   // ---------------------------------- estado da tela ----------------------------------
@@ -422,6 +440,8 @@
     acao: 'fechar', dAbrir: hojeStr(), dFechar: hojeStr(), assumir: false, segunda: false, tratativa: '',
   }, LS.get(K('tela'), {}), { sel: [] });
   let FILA = LS.get(K('fila'), []);
+  let ARR = null; // arrasto de seleção no mapa
+  document.addEventListener('mouseup', () => { if (ARR) { ARR = null; if (S.aba === 'mapa') renderMapa(); } });
   let PLANOS = LS.get(K('planos'), {});
   let RESULT = LS.get(K('result'), []);
   const salvarTela = () => { const { sel, ...r } = S; LS.set(K('tela'), r); };
@@ -471,7 +491,7 @@
   #bf2 .seg button.on{background:var(--nav);color:#fff}
   #bf2 .chk{display:flex;gap:8px;align-items:center;font:700 11.5px system-ui,sans-serif;letter-spacing:.04em;color:var(--ink);text-transform:uppercase;padding:7px 9px;border:1px solid var(--line);border-radius:8px;cursor:pointer}
   #bf2 .chk input{width:16px;height:16px;accent-color:var(--roxo);margin:0}
-  #bf2 .grid{display:grid;grid-template-columns:34px repeat(4,minmax(0,1fr)) minmax(0,.85fr) repeat(4,minmax(0,1fr));gap:3px}
+  #bf2 .grid{user-select:none;display:grid;grid-template-columns:34px repeat(4,minmax(0,1fr)) minmax(0,.85fr) repeat(4,minmax(0,1fr));gap:3px}
   #bf2 .c{position:relative;border:0;border-radius:5px;min-height:28px;font:600 11px ui-monospace,Consolas,monospace;cursor:pointer;background:#e6eaf1;color:var(--ink);padding:0;min-width:0}
   #bf2 .c.fin{background:#2f9a5a;color:#fff}#bf2 .c.ini{background:#e3a21a;color:#2b1d00}#bf2 .c.nao{background:#d2463c;color:#fff}
   #bf2 .c.none{background:#e6eaf1;color:#a3adbf;cursor:default;background-image:repeating-linear-gradient(135deg,transparent 0 5px,#cfd6e2 5px 6px)}
@@ -615,14 +635,14 @@
         <button class="b full" id="m-selini"><span style="color:#c98a00">■</span> Selecionar todos os amarelos</button>
         <button class="b full" id="m-selnao"><span style="color:#d2463c">■</span> Selecionar todos os vermelhos</button>
         <button class="b full" id="m-limpa">Limpar seleção</button>
-        <div class="muted">${S.sel.length} local(is) selecionado(s). Clique no número do andar ou da coluna para pegar a linha inteira.</div>
+        <div class="muted">${S.sel.length} local(is) selecionado(s). Clique ou arraste por cima dos apartamentos; clique no número do andar ou da coluna para pegar a linha inteira.</div>
         <h4>O que fazer</h4>
         <span class="seg">${[['abrir', 'Abrir'], ['fechar', 'Fechar']].map(([k, t]) => `<button data-a="${k}" class="${S.acao === k ? 'on' : ''}">${t}</button>`).join('')}</span>
         <label>Data de abertura (se precisar criar a ficha)<input type="date" id="m-dA" value="${esc(S.dAbrir)}" max="${hojeStr()}"></label>
         ${S.acao === 'fechar' ? `<label>Data de fechamento<input type="date" id="m-dF" value="${esc(S.dFechar)}" max="${hojeStr()}"></label>` : ''}
         ${S.acao === 'fechar' ? `<label class="chk"><input type="checkbox" id="m-seg" ${S.segunda ? 'checked' : ''}> Aprovar 2ª inspeção de itens R/X</label>
         ${S.segunda ? `<label>Tratativa (vazio = padrão)<input id="m-trat" value="${esc(S.tratativa)}" placeholder="${esc(CFG.tratativaPadrao)}"></label>` : ''}` : ''}
-        <label class="chk"><input type="checkbox" id="m-ass" ${S.assumir ? 'checked' : ''}> Assumir fichas de ex-funcionários</label>
+        <label class="chk"><input type="checkbox" id="m-ass" ${S.assumir ? 'checked' : ''}> Assumir fichas de: ${CFG.exFuncionarios.length ? esc(CFG.exFuncionarios.map((n) => n.split(/\s+/).slice(0, 2).join(' ')).join(', ')) : '<span class="muted">ninguém (Configuração)</span>'}</label>
         ${avisoGab}
         <button class="b p" id="m-add" ${!S.sel.length || !g || (S.acao === 'abrir' && !g.pre) ? 'disabled' : ''}>Adicionar à fila: ${S.acao === 'abrir' ? 'abrir' : 'fechar'} ${S.sel.length} local(is)</button>
       </div>
@@ -657,10 +677,14 @@
       FILA.push({ id: Date.now(), fvs: S.serv, acao: S.acao, areas: [...S.sel].sort((a, b) => a.localeCompare(b, 'pt', { numeric: true })), dAbrir: S.dAbrir, dFechar: S.acao === 'fechar' ? S.dFechar : S.dAbrir, opc: { assumir: S.assumir, segunda: S.acao === 'fechar' && S.segunda, tratativa: S.segunda ? S.tratativa : '' } });
       salvarFila(); status(`Adicionado à fila: ${S.acao} ${S.sel.length} local(is) de ${S.serv}.`); S.sel = []; render();
     });
-    body.querySelectorAll('.c[data-area]').forEach((c) => c.onclick = () => {
-      const n = c.dataset.area; S.detalhe = n;
-      if (c.classList.contains('none')) { renderMapa(); return; }
-      const i = S.sel.indexOf(n); if (i >= 0) S.sel.splice(i, 1); else S.sel.push(n); renderMapa();
+    // clicar ou arrastar: o primeiro quadradinho decide se o arrasto marca ou desmarca
+    const celSel = (c, modo) => { const n = c.dataset.area; if (c.classList.contains('none') || !MAPA.areas[n]) return; const i = S.sel.indexOf(n);
+      if (modo === 'add' && i < 0) S.sel.push(n); if (modo === 'rem' && i >= 0) S.sel.splice(i, 1); c.classList.toggle('sel', S.sel.includes(n)); };
+    body.querySelectorAll('.c[data-area]').forEach((c) => {
+      c.onmousedown = (e) => { if (e.button !== 0) return; e.preventDefault(); const n = c.dataset.area; S.detalhe = n;
+        if (c.classList.contains('none')) { ARR = null; renderMapa(); return; }
+        ARR = { modo: S.sel.includes(n) ? 'rem' : 'add' }; celSel(c, ARR.modo); };
+      c.onmouseenter = () => { if (ARR) celSel(c, ARR.modo); };
     });
     const toggleGrupo = (nomes) => { nomes = nomes.filter((n) => !['none'].includes(statusCel(n, S.serv)) && MAPA.areas[n]); const todos = nomes.every((n) => S.sel.includes(n)); nomes.forEach((n) => { const i = S.sel.indexOf(n); if (todos && i >= 0) S.sel.splice(i, 1); else if (!todos && i < 0) S.sel.push(n); }); renderMapa(); };
     body.querySelectorAll('[data-and]').forEach((b) => b.onclick = () => { const an = +b.dataset.and; toggleGrupo(Array.from({ length: est.P }, (_, k) => est.apto(an, k + 1)).filter(Boolean)); });
@@ -713,7 +737,7 @@
         ${FILA.map((g) => `<tr><td><b>${esc(g.fvs)}</b><br><span class="muted">${esc(nomeLimpo(g.fvs))}</span></td><td>${g.acao === 'abrir' ? 'Abrir' : 'Fechar'}</td>
           <td>${g.acao === 'abrir' ? 'abre ' + fmt(g.dAbrir) : 'abre ' + fmt(g.dAbrir) + '<br>fecha ' + fmt(g.dFechar)}</td>
           <td>${g.areas.map((a) => esc(localComTorre(a))).join(', ')}</td>
-          <td class="muted">${[g.opc && g.opc.assumir ? 'assume ex-funcionários' : '', g.opc && g.opc.segunda ? '2ª inspeção' + (g.opc.tratativa ? ': "' + esc(g.opc.tratativa) + '"' : '') : '', g.na ? 'gabarito do roteiro' : ''].filter(Boolean).join('<br>')}</td>
+          <td class="muted">${[g.opc && g.opc.assumir ? 'assume fichas da lista' : '', g.opc && g.opc.segunda ? '2ª inspeção' + (g.opc.tratativa ? ': "' + esc(g.opc.tratativa) + '"' : '') : '', g.na ? 'gabarito do roteiro' : ''].filter(Boolean).join('<br>')}</td>
           <td><button class="b" data-del="${g.id}">Tirar</button></td></tr>`).join('')}</table>` : '<div class="muted">A fila está vazia. Monte no Mapa ou cole um roteiro.</div>'}
       <div class="row">
         <button class="b" id="f-sim" ${FILA.length ? '' : 'disabled'}>Simular (não grava)</button>
@@ -1261,7 +1285,7 @@
       <label>Inspecionado por (você)<input id="q-k-insp" type="search" placeholder="filtrar: joão pedro…" value="${esc(S['cfgQk-insp'] || '')}">${sel('k-insp', S.cfgInsp || CFG.idInspecionado)}</label>
       <label>Aprovado por<input id="q-k-apr" type="search" placeholder="filtrar: jhonatan…" value="${esc(S['cfgQk-apr'] || '')}">${sel('k-apr', S.cfgApr || CFG.idAprovado)}</label>` : ''}
       ${funcs.length ? `<div class="row"><button class="b" id="k-func">Atualizar lista de funcionários</button></div>` : (obraAtualId ? `<div class="warn">Buscando a lista de funcionários da obra... <button class="b" id="k-func">Buscar de novo</button></div>` : '<div class="muted">Escolha a obra para aparecer a lista de funcionários.</div>')}
-      <label>Ex-funcionários (um por linha; o Prisma só assume fichas deles quando você marcar a opção)<textarea id="k-ex" style="min-height:70px">${esc(CFG.exFuncionarios.join('\n'))}</textarea></label>
+      <label>Assumir fichas de (um nome por linha: ex-funcionários ou colegas que autorizaram; o Prisma só assume quando você marca a opção no Mapa)<textarea id="k-ex" style="min-height:70px">${esc(CFG.exFuncionarios.join('\n'))}</textarea></label>
       <label>Tratativa padrão (usada na 2ª inspeção quando você não escreve uma)<input id="k-trat" value="${esc(CFG.tratativaPadrao)}"></label>
       <details><summary>Avançado</summary><label style="margin-top:8px;max-width:240px">Pausa entre consultas ao SGQ (ms)<input id="k-pausa" type="number" min="200" value="${esc(CFG.pausaMs)}"></label></details>
       <div class="row"><button class="b p" id="k-salva">Salvar configuração</button><button class="b" id="k-reset">Voltar ao padrão</button></div></div>${perfilHtml()}`;
