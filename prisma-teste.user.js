@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Prisma - FVS no SGQ
 // @namespace    realiza-bot-fvs
-// @version      2.12
+// @version      2.13
 // @author       João Pedro Ramos
 // @description  Prisma: mapa das torres, fila de comandos, relatórios e preenchimento de FVS no SGQ da Realiza, com travas de segurança. Usa o login do próprio usuário no SGQ.
 // @match        https://gdol.sgq2.com.br/*
@@ -17,7 +17,7 @@
 
   // ============================== CONFIGURAÇÃO PADRÃO ==============================
   // Tudo aqui pode ser trocado pela aba "Configuração" do painel (fica salvo no navegador).
-  const VERSAO = '2.12';
+  const VERSAO = '2.13';
   const CANAL = 'teste'; // 'oficial' ou 'teste' (o arquivo prisma-teste.user.js usa 'teste')
   const PADRAO = {
     obraNome: '', idObra: null,
@@ -92,7 +92,7 @@
   const isoDia = (s) => { const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d).toISOString(); };        // meia-noite local (igual à tela)
   const isoItem = (s) => { const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d, 12).toISOString(); };  // meio-dia local
   const fmt = (s) => s ? s.split('-').reverse().join('/') : '';
-  const totalPreenchido = (i) => i.totalA + i.totalNA + i.totalR + i.totalX + i.totalRA;
+  const totalPreenchido = (i) => (i.totalA || 0) + (i.totalNA || 0) + (i.totalR || 0) + (i.totalX || 0) + (i.totalRA || 0);
   const listaNum = (t) => (String(t || '').match(/\d+/g) || []).map(Number);
 
   let PARAR = false;
@@ -310,13 +310,27 @@
 
     const a = (await listarAreas()).find((x) => norm(x.nome) === norm(t.area));
     if (!a) return PEND('área não encontrada no SGQ');
-    const fv = (await servicosDaArea(a.id)).filter((x) => codNorm(x.codigo) === t.fvs);
-    if (fv.length !== 1) return PEND(fv.length ? 'FVS aparece mais de uma vez na área' : 'FVS não existe nessa área');
+    let fv = (await servicosDaArea(a.id)).filter((x) => codNorm(x.codigo) === t.fvs);
+    if (!fv.length) return PEND('FVS não existe nessa área');
+    if (fv.length > 1) { // a mesma FVS cadastrada 2x na área: só segue se sobrar exatamente uma não finalizada
+      const nf = fv.filter((x) => x.status !== 1);
+      if (!nf.length) return OK(`a FVS aparece ${fv.length} vezes na área e todas já estão finalizadas`);
+      if (nf.length > 1) return PEND(`a FVS aparece ${fv.length} vezes na área e ${nf.length} não estão finalizadas: conferir na tela qual é a certa`);
+      fv = nf;
+    }
     const idS = fv[0].idObraChecklistServico;
 
     let verifs = await listarVerif(idS);
     let abertas = verifs.filter((i) => i.status === 0 || i.status === 3);
-    if (abertas.length > 1) return PEND('mais de uma verificação aberta');
+    if (abertas.length > 1) {
+      const dt = (s) => s ? new Date(s).toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' }) : '?';
+      const desc = [];
+      for (const v of abertas.sort((x, y) => String(x.dataAbertura).localeCompare(String(y.dataAbertura)))) {
+        const d = ((await api('GET', '/obras/inspecoes-obra/' + v.idInspecaoObra)).j || {}).item || {};
+        desc.push(`aberta em ${dt(v.dataAbertura)} por ${(d.funcionarioInspecionado || 'ninguém').trim()}, ${totalPreenchido(v)}/${v.totalItens} itens`);
+      }
+      return PEND(`${abertas.length} verificações abertas: ` + desc.join(' | '));
+    }
     let V = abertas[0], criada = false;
     const naTxt = g.na.length ? 'NA ' + g.na.join(', ') : 'sem NA';
 
