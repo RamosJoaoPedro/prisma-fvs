@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Prisma - FVS no SGQ
 // @namespace    realiza-bot-fvs
-// @version      2.11
+// @version      2.12
 // @author       João Pedro Ramos
 // @description  Prisma: mapa das torres, fila de comandos, relatórios e preenchimento de FVS no SGQ da Realiza, com travas de segurança. Usa o login do próprio usuário no SGQ.
 // @match        https://gdol.sgq2.com.br/*
@@ -17,7 +17,8 @@
 
   // ============================== CONFIGURAÇÃO PADRÃO ==============================
   // Tudo aqui pode ser trocado pela aba "Configuração" do painel (fica salvo no navegador).
-  const VERSAO = '2.11';
+  const VERSAO = '2.12';
+  const CANAL = 'oficial'; // 'oficial' ou 'teste' (o arquivo prisma-teste.user.js usa 'teste')
   const PADRAO = {
     obraNome: '', idObra: null,
     idInspecionado: null, nomeInspecionado: '',
@@ -95,6 +96,23 @@
   const listaNum = (t) => (String(t || '').match(/\d+/g) || []).map(Number);
 
   let PARAR = false;
+
+  // ------------------------------ aviso central (GitHub) ------------------------------
+  // aviso.json no repositório: { "manutencao": true/false, "mensagem": "...", "versaoMinima": "2.12" }
+  // Editar esse arquivo no GitHub muda o aviso para todo mundo, sem mexer no código.
+  const AVISO_URL = 'https://raw.githubusercontent.com/RamosJoaoPedro/prisma-fvs/main/aviso.json';
+  let AVISO = null, AVISO_TS = 0;
+  const cmpVer = (a, b) => { const x = String(a || '0').split('.').map(Number), y = String(b || '0').split('.').map(Number); for (let i = 0; i < Math.max(x.length, y.length); i++) { const d = (x[i] || 0) - (y[i] || 0); if (d) return d; } return 0; };
+  async function lerAviso(forcar) {
+    if (!forcar && AVISO_TS && Date.now() - AVISO_TS < 60000) return AVISO;
+    try { const r = await fetchOrig(AVISO_URL + '?t=' + Date.now(), { cache: 'no-store' }); if (r.ok) { AVISO = await r.json(); AVISO_TS = Date.now(); } } catch (e) {}
+    return AVISO; // sem internet ou sem arquivo: segue normal
+  }
+  const bloqueio = () => { const a = AVISO || {};
+    if (a.manutencao) return 'Prisma em manutenção' + (a.mensagem ? ': ' + a.mensagem : '.') + ' Gravar está bloqueado até liberar (simular e consultar continuam).';
+    if (a.versaoMinima && cmpVer(VERSAO, a.versaoMinima) < 0) return `Esta versão (${VERSAO}) foi bloqueada para gravar. Atualize: painel do Tampermonkey → verificar atualizações (precisa da ${a.versaoMinima} ou mais nova).`;
+    return ''; };
+  const avisoHtml = () => { const a = AVISO || {}; const b = bloqueio(); if (b) return `<div class="aviso-c bloq">${esc(b)}</div>`; return a.mensagem ? `<div class="aviso-c">${esc(a.mensagem)}</div>` : ''; };
 
   async function api(method, path, body) {
     await sleep(CFG.pausaMs);
@@ -466,6 +484,9 @@
   #bf2 .lst span.d{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted)}
   #bf2 .msg{font-weight:600}
   #bf2 .muted{color:var(--muted);font-size:12px}
+  #bf2 .aviso-c{padding:8px 16px;background:#efe7ff;color:#3b1f8f;font:600 13px system-ui,sans-serif;border-bottom:1px solid #d6c8ff}
+  #bf2 .aviso-c.bloq{background:#fde8e6;color:#8a1c12;border-color:#f3b8b1}
+  #bf2.dark .aviso-c{background:#2a1f4d;color:#e2d8ff;border-color:#3d2f6e}#bf2.dark .aviso-c.bloq{background:#4a1d19;color:#ffd6d1;border-color:#6e2a24}
   #bf2 .warn{background:#fff7e0;border:1px solid #efd07a;border-radius:8px;padding:7px 9px;font-size:12px}
   #bf2 .nota{background:var(--roxoSoft);border-radius:8px;padding:8px 10px;font-size:12px;color:#3d2a78}
   #bf2 .logo{background:var(--nav);border-radius:12px;padding:10px 12px;display:grid;place-items:center;gap:6px}
@@ -501,6 +522,7 @@
   async function abrir() {
     if (!configurado()) { S.aba = 'cfg'; status('Bem-vindo ao Prisma! Faça a configuração inicial (uma vez só).'); render(); return; }
     render();
+    lerAviso(true).then(() => { if (root && root.style.display === 'flex') render(); });
     try {
       if (!token()) return status('Entre no SGQ primeiro.');
       await listarAreas();
@@ -546,8 +568,8 @@
       <div class="top"><div class="marca"><span class="ic"></span><span><b>Prisma</b><small>FVS · ${esc(CFG.obraNome)}</small></span></div>
         <div class="tabs">${[['mapa', 'Mapa'], ['fila', `Fila (${nFila})`], ['rel', 'Relatório'], ['colar', 'Colar roteiro'], ['gab', 'Gabaritos'], ['cfg', 'Configuração']].map(([k, t]) => `<button data-aba="${k}" class="${S.aba === k ? 'on' : ''}">${t}</button>`).join('')}</div>
         <button class="x" id="bf2-x">Fechar</button></div>
-      <div class="body" id="bf2-body"></div>
-      <div class="foot"><span class="msg" id="bf2-status">${esc(STATUS)}</span><span class="assin">Prisma v${VERSAO} · criado por João Pedro Ramos</span></div>`;
+      ${avisoHtml()}<div class="body" id="bf2-body"></div>
+      <div class="foot"><span class="msg" id="bf2-status">${esc(STATUS)}</span><span class="assin">Prisma v${VERSAO}${CANAL === 'teste' ? ' (TESTE)' : ''} · criado por João Pedro Ramos</span></div>`;
     root.querySelectorAll('[data-aba]').forEach((b) => b.onclick = () => { if (!configurado() && b.dataset.aba !== 'cfg') return status('Termine a configuração inicial primeiro.'); S.aba = b.dataset.aba; salvarTela(); render(); });
     if (!configurado()) S.aba = 'cfg';
     $('#bf2-x').onclick = () => { root.style.display = 'none'; };
@@ -715,6 +737,7 @@
   async function rodarFila(simular) {
     const tarefas = tarefasDaFila();
     if (!tarefas.length) return;
+    if (!simular) { await lerAviso(true); const b = bloqueio(); if (b) { render(); status(b); return; } }
     if (!simular && !sessaoDaTela()) { status('Antes de gravar, clique em qualquer menu do SGQ (ex.: Dashboard) e espere carregar: o Prisma usa a mesma sessão da tela.'); return; }
     if (!simular && !confirm(`Vai GRAVAR no SGQ ${tarefas.length} ficha(s):\n\n${FILA.map((g) => `• ${g.acao === 'abrir' ? 'ABRIR em ' + fmt(g.dAbrir) : 'FECHAR em ' + fmt(g.dFechar)} · ${g.fvs} · ${g.areas.length} local(is)`).join('\n')}\n\nInspecionado por: ${CFG.nomeInspecionado}\nAprovado por: ${CFG.nomeAprovado}\n\nContinuar?`)) return;
     PARAR = false; RESULT = []; const feitos = new Set();
