@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Prisma - FVS no SGQ
 // @namespace    realiza-bot-fvs
-// @version      2.14
+// @version      2.15
 // @author       João Pedro Ramos
 // @description  Prisma: mapa das torres, fila de comandos, relatórios e preenchimento de FVS no SGQ da Realiza, com travas de segurança. Usa o login do próprio usuário no SGQ.
 // @match        https://gdol.sgq2.com.br/*
@@ -17,7 +17,7 @@
 
   // ============================== CONFIGURAÇÃO PADRÃO ==============================
   // Tudo aqui pode ser trocado pela aba "Configuração" do painel (fica salvo no navegador).
-  const VERSAO = '2.14';
+  const VERSAO = '2.15';
   const CANAL = 'oficial'; // 'oficial' ou 'teste' (o arquivo prisma-teste.user.js usa 'teste')
   const PADRAO = {
     obraNome: '', idObra: null,
@@ -156,6 +156,17 @@
     const S = await servicosDaArea(a.id);
     const fvs = {};
     for (const x of S) { const c = codNorm(x.codigo); fvs[c] = [x.idObraChecklistServico, x.status, x.total, +(x.ir > 0), +(x.irep > 0)]; if (!NOMES[c]) NOMES[c] = (x.descricao || '').trim(); }
+    const antes = MAPA.areas[a.nome];
+    if (antes && antes.fvs) { // compara com a leitura anterior e registra o que mudou no SGQ
+      const agora = new Date().toISOString(), recente = (cod) => HIST.some((x) => x.src === 'prisma' && x.a === a.nome && x.f === cod && Date.now() - new Date(x.q) < 15 * 60000);
+      for (const [cod, e] of Object.entries(fvs)) {
+        const o = antes.fvs[cod]; let ev = null;
+        if (!o) ev = 'nova'; else if (o[1] !== 1 && e[1] === 1) ev = 'finalizada'; else if (o[1] === 1 && e[1] !== 1) ev = 'reaberta'; else if (!(o[2] > 0) && e[2] > 0) ev = 'iniciada'; else if (o[2] > 0 && !(e[2] > 0) && e[1] !== 1) ev = 'zerada';
+        if (ev && !recente(cod)) HIST.push({ q: agora, a: a.nome, f: cod, ev, src: 'sgq' });
+      }
+      if (HIST.length > 6000) HIST = HIST.slice(-6000);
+      salvarHist();
+    }
     MAPA.areas[a.nome] = { id: a.id, fvs };
   }
   const salvarMapa = () => LS.set(K('mapa'), MAPA);
@@ -440,6 +451,8 @@
     acao: 'fechar', dAbrir: hojeStr(), dFechar: hojeStr(), assumir: false, segunda: false, tratativa: '',
   }, LS.get(K('tela'), {}), { sel: [] });
   let FILA = LS.get(K('fila'), []);
+  let HIST = LS.get(K('hist'), []);
+  const salvarHist = () => LS.set(K('hist'), HIST);
   let ARR = null; // arrasto de seleção no mapa
   document.addEventListener('mouseup', () => { if (ARR) { ARR = null; if (S.aba === 'mapa') renderMapa(); } });
   let PLANOS = LS.get(K('planos'), {});
@@ -510,6 +523,7 @@
   #bf2 th{background:var(--nav);color:#fff;font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.04em}
   #bf2 td,#bf2 th{border:1px solid var(--line);padding:5px 7px;text-align:left;vertical-align:top}
   #bf2 tr.ok td{background:#eaf7ee}#bf2 tr.pend td{background:#fdeef0}
+  #bf2 .hchip{display:inline-flex;gap:5px;align-items:center;background:var(--card,#fff);border:1px solid var(--line);border-radius:8px;padding:6px 10px;font-size:13px}
   #bf2 .chip{font-size:10px;font-weight:700;text-transform:uppercase;border-radius:20px;padding:1px 7px;white-space:nowrap;color:#fff}
   #bf2 .chip.fin{background:#2f9a5a}#bf2 .chip.ini{background:#e3a21a;color:#2b1d00}#bf2 .chip.nao{background:#d2463c}
   #bf2 .lst{display:grid;gap:2px;max-height:46vh;overflow:auto}
@@ -600,14 +614,14 @@
     root.classList.toggle('dark', !!CFG.escuro);
     root.innerHTML = `
       <div class="top"><div class="marca"><span class="ic"></span><span><b>Prisma</b><small>FVS · ${esc(CFG.obraNome)}</small></span></div>
-        <div class="tabs">${[['mapa', 'Mapa'], ['fila', `Fila (${nFila})`], ['rel', 'Relatório'], ['colar', 'Colar roteiro'], ['gab', 'Gabaritos'], ['cfg', 'Configuração']].map(([k, t]) => `<button data-aba="${k}" class="${S.aba === k ? 'on' : ''}">${t}</button>`).join('')}</div>
+        <div class="tabs">${[['mapa', 'Mapa'], ['fila', `Fila (${nFila})`], ['rel', 'Relatório'], ['hist', 'Histórico'], ['colar', 'Colar roteiro'], ['gab', 'Gabaritos'], ['cfg', 'Configuração']].map(([k, t]) => `<button data-aba="${k}" class="${S.aba === k ? 'on' : ''}">${t}</button>`).join('')}</div>
         <button class="x" id="bf2-x">Fechar</button></div>
       ${avisoHtml()}<div class="body" id="bf2-body"></div>
       <div class="foot"><span class="msg" id="bf2-status">${esc(STATUS)}</span><span class="assin">Prisma v${VERSAO}${CANAL === 'teste' ? ' (TESTE)' : ''} · criado por João Pedro Ramos</span></div>`;
     root.querySelectorAll('[data-aba]').forEach((b) => b.onclick = () => { if (!configurado() && b.dataset.aba !== 'cfg') return status('Termine a configuração inicial primeiro.'); S.aba = b.dataset.aba; salvarTela(); render(); });
     if (!configurado()) S.aba = 'cfg';
     $('#bf2-x').onclick = () => { root.style.display = 'none'; };
-    ({ mapa: renderMapa, fila: renderFila, rel: renderRel, colar: renderColar, gab: renderGab, cfg: renderCfg })[S.aba]();
+    ({ mapa: renderMapa, fila: renderFila, rel: renderRel, hist: renderHist, colar: renderColar, gab: renderGab, cfg: renderCfg })[S.aba]();
   }
 
   // ------------------------------ aba MAPA ------------------------------
@@ -786,6 +800,7 @@
       let r; try { r = await executarTarefa(t, simular); } catch (e) { r = PEND('erro: ' + e.message); if (/Sessão expirada/.test(e.message)) PARAR = true; }
       if (r.resultado === 'PENDENTE' && /funcion[aá]rio vinculado/i.test(r.msg || '')) { PARAR = true; r.msg += ' · Seu login do SGQ está sem funcionário vinculado: o próprio SGQ recusa qualquer gravação, até pela tela. Fila parada para não repetir o erro em todas as fichas. Peça para a TI/administrador do SGQ vincular seu usuário ao seu cadastro de funcionário e rode de novo.'; status('Fila parada: seu login do SGQ está sem funcionário vinculado. Fale com a TI e rode de novo depois.'); }
       RESULT.push({ area: t.area, fvs: t.fvs, acao: t.acao, ...r, quando: new Date().toLocaleString('pt-BR'), simulacao: simular });
+      if (!simular) { HIST.push({ q: new Date().toISOString(), a: t.area, f: t.fvs, ac: t.acao, r: r.resultado, d: r.msg, src: 'prisma', u: CFG.nomeInspecionado }); if (HIST.length > 6000) HIST = HIST.slice(-6000); salvarHist(); }
       if (!simular && r.resultado === 'OK') { feitos.add(t.area); const g = FILA.find((x) => x.id === t.grupo); if (g) g.areas = g.areas.filter((a) => a !== t.area); }
       const fr = $('#f-res'); if (fr) fr.innerHTML = tabelaRes(RESULT);
     }
@@ -1001,6 +1016,46 @@
     $('#r-gerar').onclick = () => gerarRelatorio().catch((e) => status('Erro: ' + e.message));
     $('#r-ppc-ok').onclick = () => conferirPpc().catch((e) => status('Erro: ' + e.message));
     ligarBotoesRel();
+  }
+  // ------------------------------ aba HISTÓRICO ------------------------------
+  // Duas fontes: o que o Prisma gravou (src 'prisma') e mudanças vistas ao atualizar o mapa (src 'sgq', feitas por qualquer pessoa).
+  const dataLocal = (iso) => { const d = new Date(iso); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
+  const horaLocal = (iso) => new Date(iso).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+  function eventoDe(h) {
+    if (h.src === 'sgq') return { finalizada: 'Finalizada', iniciada: 'Iniciada', reaberta: 'Voltou a ficar aberta', nova: 'FVS nova no local', zerada: 'Itens apagados' }[h.ev] || h.ev;
+    if (h.r !== 'OK') return 'Pendente';
+    if (/^(já|a FVS aparece)/.test(h.d || '')) return h.ac === 'abrir' ? 'Já estava aberta' : 'Já estava fechada';
+    return h.ac === 'abrir' ? 'Aberta' : /finalizada/.test(h.d || '') ? 'Fechada e finalizada' : 'Fechada';
+  }
+  const COR_EV = { 'Aberta': '#e3a21a', 'Iniciada': '#e3a21a', 'Fechada e finalizada': '#2f9a5a', 'Finalizada': '#2f9a5a', 'Fechada': '#2f9a5a', 'Pendente': '#d2463c', 'Voltou a ficar aberta': '#d2463c', 'Itens apagados': '#d2463c' };
+  function renderHist() {
+    const body = $('#bf2-body');
+    S.hDia = S.hDia || hojeStr(); S.hSrc = S.hSrc || 'todos';
+    const dias = [...new Set(HIST.map((h) => dataLocal(h.q)))].sort().reverse();
+    const L = HIST.filter((h) => dataLocal(h.q) === S.hDia && (S.hSrc === 'todos' || h.src === S.hSrc) && (!S.hServ || h.f === S.hServ)).sort((a, b) => b.q.localeCompare(a.q));
+    const cont = {}; L.forEach((h) => { const e = eventoDe(h); cont[e] = (cont[e] || 0) + 1; });
+    const servs = [...new Set(HIST.filter((h) => dataLocal(h.q) === S.hDia).map((h) => h.f))].sort((a, b) => a.localeCompare(b, 'pt', { numeric: true }));
+    body.innerHTML = `<div class="card topo"><h4>Histórico do dia</h4>
+      <div class="nota">O que o <b>Prisma gravou</b> e o que <b>mudou no SGQ</b> (visto ao atualizar o mapa: inclui o que foi feito na mão ou por outras pessoas; a hora é a da leitura, não a do lançamento). Fica guardado neste navegador.</div>
+      <div class="row">
+        <label style="max-width:170px">Dia<input type="date" id="h-dia" value="${esc(S.hDia)}" max="${hojeStr()}"></label>
+        <label style="max-width:200px">Mostrar<select id="h-src"><option value="todos">Tudo</option><option value="prisma" ${S.hSrc === 'prisma' ? 'selected' : ''}>Só o que o Prisma gravou</option><option value="sgq" ${S.hSrc === 'sgq' ? 'selected' : ''}>Só mudanças vistas no SGQ</option></select></label>
+        <label style="max-width:260px">Serviço<select id="h-serv"><option value="">Todos</option>${servs.map((c) => `<option value="${esc(c)}" ${S.hServ === c ? 'selected' : ''}>${esc(c)} · ${esc(nomeLimpo(c))}</option>`).join('')}</select></label>
+      </div>
+      <div class="row">${dias.slice(0, 7).map((d) => `<button class="b ${d === S.hDia ? 'n' : ''}" data-hd="${d}">${d === hojeStr() ? 'Hoje' : fmt(d)}</button>`).join('')}</div>
+      <div class="row">${Object.keys(cont).length ? Object.entries(cont).map(([e, n]) => `<span class="hchip" style="border-left:4px solid ${COR_EV[e] || '#8a94a6'}"><b>${n}</b> ${esc(e)}</span>`).join('') : '<span class="muted">Nada registrado nesse dia.</span>'}</div>
+      ${L.length ? `<div class="row"><button class="b" id="h-copiar">Copiar para o Excel</button><button class="b w" id="h-limpar">Apagar o histórico deste dia</button></div>
+      <div style="overflow:auto;max-height:52vh"><table><tr><th>Hora</th><th>Local</th><th>FVS</th><th>O que aconteceu</th><th>Por</th><th>Detalhe</th></tr>
+        ${L.map((h) => { const e = eventoDe(h); return `<tr><td>${horaLocal(h.q)}</td><td>${esc(localComTorre(h.a))}</td><td><b>${esc(h.f.replace('FVS ', ''))}</b> <span class="muted">${esc(nomeLimpo(h.f))}</span></td><td style="color:${COR_EV[e] || 'inherit'};font-weight:700">${esc(e)}</td><td class="muted">${h.src === 'prisma' ? 'Prisma (' + esc((h.u || '').split(' ')[0]) + ')' : 'visto no SGQ'}</td><td class="muted">${esc(h.d || '')}</td></tr>`; }).join('')}</table></div>` : ''}
+    </div>`;
+    $('#h-dia').onchange = (e) => { S.hDia = e.target.value || hojeStr(); S.hServ = ''; renderHist(); };
+    $('#h-src').onchange = (e) => { S.hSrc = e.target.value; renderHist(); };
+    $('#h-serv').onchange = (e) => { S.hServ = e.target.value; renderHist(); };
+    body.querySelectorAll('[data-hd]').forEach((b) => b.onclick = () => { S.hDia = b.dataset.hd; S.hServ = ''; renderHist(); });
+    const cp = $('#h-copiar'); if (cp) cp.onclick = async () => {
+      const tsv = ['Dia\tHora\tTorre\tLocal\tFVS\tServiço\tO que aconteceu\tPor\tDetalhe', ...L.map((h) => [fmt(dataLocal(h.q)), horaLocal(h.q), (torreDe(h.a) || {}).nome || '', localCurto(h.a), h.f, nomeLimpo(h.f), eventoDe(h), h.src === 'prisma' ? 'Prisma (' + (h.u || '') + ')' : 'visto no SGQ', (h.d || '').replace(/\s+/g, ' ')].join('\t'))].join('\n');
+      try { await navigator.clipboard.writeText(tsv); status(L.length + ' linha(s) copiadas. Cole no Excel com Ctrl + V.'); } catch (e) { status('Não deu para copiar sozinho.'); } };
+    const lp = $('#h-limpar'); if (lp) lp.onclick = () => { if (!confirm('Apagar o histórico de ' + fmt(S.hDia) + ' deste navegador? (Não mexe em nada no SGQ.)')) return; HIST = HIST.filter((h) => dataLocal(h.q) !== S.hDia); salvarHist(); renderHist(); };
   }
   async function garantirMapa(torres) {
     await listarAreas(); if (!Object.keys(NOMES).length) await carregarNomes();
@@ -1334,7 +1389,7 @@
       const mudouObra = idObra !== CFG.idObra || !(CFG.torres && CFG.torres.length);
       CFG = Object.assign({}, PADRAO, novo);
       if (mudouObra) {
-        AREAS = null; NOMES = LS.get(K('nomes'), {}); MAPA = LS.get(K('mapa'), { ts: {}, areas: {} }); GAB_USER = LS.get(K('gab'), {}); FILA = LS.get(K('fila'), []); PLANOS = LS.get(K('planos'), {});
+        AREAS = null; NOMES = LS.get(K('nomes'), {}); MAPA = LS.get(K('mapa'), { ts: {}, areas: {} }); GAB_USER = LS.get(K('gab'), {}); FILA = LS.get(K('fila'), []); PLANOS = LS.get(K('planos'), {}); HIST = LS.get(K('hist'), []);
         CFG.torres = []; zerarLeitura();
         try { const D = await gerarDiagnostico(idObra, obraNome); CFG.torres = D.torres.map((t) => ({ nome: t.nome, bloco: t.bloco, hall: t.hall, pos: t.pos, meio: t.meio, tipo: t.tipo })); novo.torres = CFG.torres; } catch (e) { status('Erro ao ler a obra: ' + e.message); }
         S.torre = (CFG.torres[0] || {}).nome || '';
