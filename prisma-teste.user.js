@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Prisma - FVS no SGQ
 // @namespace    realiza-bot-fvs
-// @version      2.15
+// @version      2.16
 // @author       João Pedro Ramos
 // @description  Prisma: mapa das torres, fila de comandos, relatórios e preenchimento de FVS no SGQ da Realiza, com travas de segurança. Usa o login do próprio usuário no SGQ.
 // @match        https://gdol.sgq2.com.br/*
@@ -17,7 +17,7 @@
 
   // ============================== CONFIGURAÇÃO PADRÃO ==============================
   // Tudo aqui pode ser trocado pela aba "Configuração" do painel (fica salvo no navegador).
-  const VERSAO = '2.15';
+  const VERSAO = '2.16';
   const CANAL = 'teste'; // 'oficial' ou 'teste' (o arquivo prisma-teste.user.js usa 'teste')
   const PADRAO = {
     obraNome: '', idObra: null,
@@ -54,8 +54,10 @@
   const API = 'https://gdolproducao-api.sgq2.com.br/api';
   const LS = {
     get: (k, d) => { try { const v = JSON.parse(localStorage.getItem('botFvs2_' + k)); return v ?? d; } catch (e) { return d; } },
-    set: (k, v) => { try { localStorage.setItem('botFvs2_' + k, JSON.stringify(v)); } catch (e) {} },
+    set: (k, v) => { try { localStorage.setItem('botFvs2_' + k, JSON.stringify(v)); return true; } catch (e) { setTimeout(() => avisoEspaco(k), 0); return false; } },
   };
+  // O navegador guarda pouco por site (uns 5 MB). Se encher, avisa em vez de perder os dados calado.
+  function avisoEspaco(k) { status(`Atenção: o navegador ficou sem espaço e não salvou "${String(k).replace(/_\d+$/, '')}". Apague dias antigos na aba Histórico ou planos que não usa mais.`); }
   let CFG = Object.assign({}, PADRAO, LS.get('cfg', {}));
   const K = (k) => k + '_' + CFG.idObra; // chaves por obra
 
@@ -96,6 +98,8 @@
   const listaNum = (t) => (String(t || '').match(/\d+/g) || []).map(Number);
 
   let PARAR = false;
+  let RODANDO = false; // fila rodando: trava outro "Executar" e o que mexe na fila até terminar
+  const ocupado = () => { if (RODANDO) status('Espere a fila terminar (ou clique em Parar na aba Fila) antes de fazer isso.'); return RODANDO; };
 
   // ------------------------------ aviso central (GitHub) ------------------------------
   // aviso.json no repositório: { "manutencao": true/false, "mensagem": "...", "versaoMinima": "2.12" }
@@ -593,6 +597,8 @@
       try { await atualizarArea(n); } catch (e) { if (/Sessão expirada/.test(e.message)) throw e; }
       if (i % 20 === 0) { salvarMapa(); renderMapa(); }
     }
+    // Parou no meio: não marca a torre como lida, senão o mapa fica incompleto parecendo atualizado.
+    if (i < todas.length) { salvarMapa(); status(`Leitura da ${T.nome} interrompida em ${i}/${todas.length}. Clique em "Atualizar ${T.nome}" para ler tudo.`); return; }
     MAPA.ts[T.nome] = new Date().toISOString(); salvarMapa(); LS.set(K('nomes'), NOMES);
     status(`${T.nome} atualizada às ${new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}.`);
   }
@@ -685,7 +691,7 @@
     const selPor = (cls) => { est.todas.forEach((n) => { if (statusCel(n, S.serv) === cls && !S.sel.includes(n)) S.sel.push(n); }); renderMapa(); };
     on('#m-selini', 'onclick', () => selPor('ini'));
     on('#m-selnao', 'onclick', () => selPor('nao'));
-    on('#m-atu', 'onclick', async () => { PARAR = false; try { await atualizarTorre(T); } catch (e) { status('Erro: ' + e.message); } renderMapa(); });
+    on('#m-atu', 'onclick', async () => { if (ocupado()) return; PARAR = false; try { await atualizarTorre(T); } catch (e) { status('Erro: ' + e.message); } renderMapa(); });
     on('#m-add', 'onclick', () => {
       if (S.acao === 'fechar' && S.dAbrir > S.dFechar) return status('A data de abertura não pode ser depois da de fechamento.');
       FILA.push({ id: Date.now(), fvs: S.serv, acao: S.acao, areas: [...S.sel].sort((a, b) => a.localeCompare(b, 'pt', { numeric: true })), dAbrir: S.dAbrir, dFechar: S.acao === 'fechar' ? S.dFechar : S.dAbrir, opc: { assumir: S.assumir, segunda: S.acao === 'fechar' && S.segunda, tratativa: S.segunda ? S.tratativa : '' } });
@@ -752,12 +758,12 @@
           <td>${g.acao === 'abrir' ? 'abre ' + fmt(g.dAbrir) : 'abre ' + fmt(g.dAbrir) + '<br>fecha ' + fmt(g.dFechar)}</td>
           <td>${g.areas.map((a) => esc(localComTorre(a))).join(', ')}</td>
           <td class="muted">${[g.opc && g.opc.assumir ? 'assume fichas da lista' : '', g.opc && g.opc.segunda ? '2ª inspeção' + (g.opc.tratativa ? ': "' + esc(g.opc.tratativa) + '"' : '') : '', g.na ? 'gabarito do roteiro' : ''].filter(Boolean).join('<br>')}</td>
-          <td><button class="b" data-del="${g.id}">Tirar</button></td></tr>`).join('')}</table>` : '<div class="muted">A fila está vazia. Monte no Mapa ou cole um roteiro.</div>'}
+          <td><button class="b" data-del="${g.id}" ${RODANDO ? 'disabled' : ''}>Tirar</button></td></tr>`).join('')}</table>` : '<div class="muted">A fila está vazia. Monte no Mapa ou cole um roteiro.</div>'}
       <div class="row">
-        <button class="b" id="f-sim" ${FILA.length ? '' : 'disabled'}>Simular (não grava)</button>
-        <button class="b p" id="f-run" ${FILA.length ? '' : 'disabled'}>Executar no SGQ</button>
-        <button class="b w" id="f-stop">Parar</button>
-        <button class="b" id="f-limpa" ${FILA.length ? '' : 'disabled'}>Esvaziar fila</button>
+        <button class="b" id="f-sim" ${FILA.length && !RODANDO ? '' : 'disabled'}>Simular (não grava)</button>
+        <button class="b p" id="f-run" ${FILA.length && !RODANDO ? '' : 'disabled'}>Executar no SGQ</button>
+        <button class="b w" id="f-stop" ${RODANDO ? '' : 'disabled'}>Parar</button>
+        <button class="b" id="f-limpa" ${FILA.length && !RODANDO ? '' : 'disabled'}>Esvaziar fila</button>
       </div>
       <h4>Planos (para repetir, ex.: abrir na segunda e fechar na sexta)</h4>
       <div class="row"><input id="p-nome" placeholder="nome do plano, ex.: semana 20/10" style="max-width:260px"><button class="b" id="p-salva" ${FILA.length ? '' : 'disabled'}>Salvar fila como plano</button></div>
@@ -767,9 +773,9 @@
       <h4>Último resultado</h4>
       <div class="row"><button class="b" id="r-copia" ${RESULT.length ? '' : 'disabled'}>Copiar resultado (para colar na planilha)</button></div>
       <div id="f-res">${tabelaRes(RESULT)}</div></div>`;
-    body.querySelectorAll('[data-del]').forEach((b) => b.onclick = () => { FILA = FILA.filter((g) => String(g.id) !== b.dataset.del); salvarFila(); render(); });
-    $('#f-limpa').onclick = () => { if (confirm('Esvaziar a fila?')) { FILA = []; salvarFila(); render(); } };
-    $('#f-stop').onclick = () => { PARAR = true; status('Parando depois da ficha atual...'); };
+    body.querySelectorAll('[data-del]').forEach((b) => b.onclick = () => { if (ocupado()) return; FILA = FILA.filter((g) => String(g.id) !== b.dataset.del); salvarFila(); render(); });
+    $('#f-limpa').onclick = () => { if (ocupado()) return; if (confirm('Esvaziar a fila?')) { FILA = []; salvarFila(); render(); } };
+    $('#f-stop').onclick = () => { if (!RODANDO) return; PARAR = true; status('Parando depois da ficha atual...'); };
     $('#f-sim').onclick = () => rodarFila(true);
     $('#f-run').onclick = () => rodarFila(false);
     $('#p-salva').onclick = () => { const n = ($('#p-nome').value || '').trim() || ('plano ' + new Date().toLocaleDateString('pt-BR')); PLANOS[n] = JSON.parse(JSON.stringify(FILA)); LS.set(K('planos'), PLANOS); status('Plano "' + n + '" salvo.'); render(); };
@@ -786,9 +792,15 @@
     const ok = L.filter((x) => x.resultado === 'OK').length;
     return `<div class="muted">${ok} OK · ${L.length - ok} pendente(s)${L[0] && L[0].simulacao ? ' · SIMULAÇÃO (nada gravado)' : ''}</div><table><tr><th>Local</th><th>FVS</th><th>Ação</th><th>Resultado</th><th>Detalhe</th></tr>${L.map((x) => `<tr class="${x.resultado === 'OK' ? 'ok' : 'pend'}"><td>${esc(x.area)}</td><td>${esc(x.fvs)}</td><td>${esc(x.acao)}</td><td>${esc(x.resultado)}</td><td>${esc(x.msg)}</td></tr>`).join('')}</table>`;
   }
+  // Só uma execução por vez: um clique duplo em "Executar" podia rodar a fila duas vezes ao mesmo tempo e criar duas verificações na mesma FVS.
   async function rodarFila(simular) {
+    if (ocupado()) return;
     const tarefas = tarefasDaFila();
     if (!tarefas.length) return;
+    RODANDO = true; render(); // redesenha já com os botões travados
+    try { await rodarFilaJa(simular, tarefas); } finally { RODANDO = false; PARAR = false; render(); } // PARAR não fica ligado e corta a próxima leitura do mapa
+  }
+  async function rodarFilaJa(simular, tarefas) {
     if (!simular) { await lerAviso(true); const b = bloqueio(); if (b) { render(); status(b); return; } }
     if (!simular && !sessaoDaTela()) { status('Antes de gravar, clique em qualquer menu do SGQ (ex.: Dashboard) e espere carregar: o Prisma usa a mesma sessão da tela.'); return; }
     if (!simular && !confirm(`Vai GRAVAR no SGQ ${tarefas.length} ficha(s):\n\n${FILA.map((g) => `• ${g.acao === 'abrir' ? 'ABRIR em ' + fmt(g.dAbrir) : 'FECHAR em ' + fmt(g.dFechar)} · ${g.fvs} · ${g.areas.length} local(is)`).join('\n')}\n\nInspecionado por: ${CFG.nomeInspecionado}\nAprovado por: ${CFG.nomeAprovado}\n\nContinuar?`)) return;
@@ -813,7 +825,6 @@
     }
     const ok = RESULT.filter((x) => x.resultado === 'OK').length;
     status(`${simular ? 'Simulação' : 'Execução'} terminada: ${ok} OK, ${RESULT.length - ok} pendente(s).${simular ? ' Nada foi gravado.' : ' O que deu OK saiu da fila; o pendente ficou nela.'}`);
-    render();
   }
 
   // ------------------------------ aba COLAR ROTEIRO ------------------------------
@@ -825,11 +836,13 @@
       <div class="row"><label style="max-width:200px">Abrir em<input type="date" id="c-dA" value="${esc(S.dAbrir)}" max="${hojeStr()}"></label><label style="max-width:200px">Fechar em<input type="date" id="c-dF" value="${esc(S.dFechar)}" max="${hojeStr()}"></label>
         <button class="b p" id="c-ok">Mandar para a fila</button></div></div>`;
     $('#c-ok').onclick = () => {
-      const dA = $('#c-dA').value, dF = $('#c-dF').value; let n = 0;
+      const dA = $('#c-dA').value, dF = $('#c-dF').value; let n = 0; const pulou = [];
       for (const linha of $('#c-txt').value.split(/\r?\n/)) {
         const c = linha.split('\t').map((x) => (x || '').trim());
         if (!/^\d+$/.test(c[0] || '')) continue;
-        const [, area, fvs, , oq, itens, stf, oc, feito] = c;
+        // Linha com colunas faltando (copiada pela metade) não pode derrubar o roteiro inteiro.
+        const [, area = '', fvs = '', , oq = '', itens = '', stf = '', oc = '', feito = ''] = c;
+        if (!area || !fvs) { pulou.push(c[0]); continue; }
         if (/^(true|verdadeiro|sim|x|ok)$/i.test(feito || '') || /parad/i.test(oq)) continue;
         const abrir = /iniciada/i.test(stf) && !/encerrad/i.test(stf);
         const na = listaNum((itens.match(/NA n[oa]s? ([0-9 ,e]+)/i) || [])[1]);
@@ -838,7 +851,8 @@
           opc: { assumir: /assumir/i.test(oq), segunda: /2[ªa] inspe|segunda inspe|tratativa/i.test(oq), tratativa: (/^tratativa:\s*(.+)$/i.exec(oc || '') || [])[1] || '' } });
         n++;
       }
-      salvarFila(); status(n + ' linha(s) mandadas para a fila.'); S.aba = 'fila'; render();
+      salvarFila(); S.aba = 'fila'; render();
+      status(n + ' linha(s) mandadas para a fila.' + (pulou.length ? ` ${pulou.length} linha(s) ignorada(s) por falta de área ou FVS (ID ${pulou.join(', ')}).` : ''));
     };
   }
 
@@ -1062,6 +1076,7 @@
     for (const T of torres) if (!MAPA.ts[T.nome]) await atualizarTorre(T);
   }
   async function gerarRelatorio() {
+    if (ocupado()) return;
     const torres = S.relTorre === 'todas' ? CFG.torres : CFG.torres.filter((t) => t.nome === S.relTorre);
     PARAR = false; await garantirMapa(torres);
     const ler = S.relLer !== false, linhas = [];
@@ -1082,6 +1097,7 @@
     status(`Relatório pronto: ${linhas.length} linha(s).`); renderRel();
   }
   async function conferirPpc() {
+    if (ocupado()) return;
     PARAR = false; await garantirMapa(CFG.torres);
     const linhas = [], naoEntendi = [];
     const L = (S.relPpc || '').split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
