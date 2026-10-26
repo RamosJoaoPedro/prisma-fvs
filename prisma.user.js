@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Prisma - FVS no SGQ
 // @namespace    realiza-bot-fvs
-// @version      2.17
+// @version      2.18
 // @author       João Pedro Ramos
 // @description  Prisma: mapa das torres, fila de comandos, relatórios e preenchimento de FVS no SGQ da Realiza, com travas de segurança. Usa o login do próprio usuário no SGQ.
 // @match        https://gdol.sgq2.com.br/*
@@ -17,7 +17,7 @@
 
   // ============================== CONFIGURAÇÃO PADRÃO ==============================
   // Tudo aqui pode ser trocado pela aba "Configuração" do painel (fica salvo no navegador).
-  const VERSAO = '2.17';
+  const VERSAO = '2.18';
   const CANAL = 'oficial'; // 'oficial' ou 'teste' (o arquivo prisma-teste.user.js usa 'teste')
   const PADRAO = {
     obraNome: '', idObra: null,
@@ -1009,7 +1009,7 @@
     const ref = ab || ult;
     let sit = e[1] === 1 ? 'fin' : ab ? (ab.status === 3 || totalPreenchido(ab) > 0 ? 'ini' : 'vni') : 'enc';
     let inspetor = '';
-    if (sit !== 'fin') { const d = ((await api('GET', '/obras/inspecoes-obra/' + ref.idInspecaoObra)).j || {}).item || {}; inspetor = (d.funcionarioInspecionado || '').trim(); }
+    { const d = ((await api('GET', '/obras/inspecoes-obra/' + ref.idInspecaoObra)).j || {}).item || {}; inspetor = (d.funcionarioInspecionado || '').trim(); } // também nas finalizadas: a planilha leva o responsável de todas
     const dt = (s) => s ? new Date(s).toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' }) : '';
     return { ...base, sit, itens: `${totalPreenchido(ref)}/${ref.totalItens}`, inspetor, abertura: dt(ref.dataAbertura), encerramento: dt(ref.dataEncerramento), rx: (ref.totalR || 0) + (ref.totalX || 0) > 0 };
   }
@@ -1033,7 +1033,7 @@
         <textarea id="r-ppc" placeholder="regularização 3Q 1401, 2 e 3&#10;shaft 3Q final 10&#10;louças 2Q 1501 a 1504">${esc(S.relPpc || '')}</textarea>
         <div class="row"><label style="max-width:200px">Data do PPC<input type="date" id="r-dppc" value="${esc(S.relDppc || hojeStr())}"></label><button class="b p" id="r-ppc-ok">Conferir no SGQ</button></div></div>
     </div>
-    <div class="card" style="margin-top:14px" id="r-out">${REL ? previewRel() : '<div class="muted">O relatório aparece aqui. Depois você abre a versão para imprimir ou salvar em PDF.</div>'}</div>`;
+    <div class="card" style="margin-top:14px" id="r-out">${REL ? previewRel() : '<div class="muted">O relatório aparece aqui. Depois você baixa a planilha no modelo do Controle de FVS (Registro, Dashboard e Categorias).</div>'}</div>`;
     $('#r-torre').onchange = (e) => { S.relTorre = e.target.value; salvarTela(); };
     $('#r-filtro').onchange = (e) => { S.relFiltro = e.target.value; salvarTela(); };
     $('#r-ler').onchange = (e) => { S.relLer = e.target.checked; salvarTela(); };
@@ -1102,7 +1102,7 @@
     const lista = alvo.filter(([n, c]) => !(S.relFiltro === 'pend' && MAPA.areas[n].fvs[c][1] === 1));
     const res = []; let feitos = 0; // res[k] na mesma ordem da lista, mesmo lendo várias fichas ao mesmo tempo
     await emParalelo(lista, async ([n, c], k) => {
-      res[k] = await situacaoDetalhada(n, c, ler && MAPA.areas[n].fvs[c][1] !== 1);
+      res[k] = await situacaoDetalhada(n, c, ler);
       feitos++; status(`Montando relatório: ${feitos}/${lista.length} (${localComTorre(n)} · ${c})`);
     });
     res.forEach((x) => { if (x) linhas.push(x); });
@@ -1135,53 +1135,165 @@
   function previewRel() {
     const c = contarSit(REL.linhas);
     return `<div class="row" style="justify-content:space-between"><div><h4>${esc(REL.titulo)}</h4><div class="muted">${esc(REL.subtitulo)}</div></div>
-      <div class="row"><button class="b p" id="r-print">Abrir para imprimir / PDF</button><button class="b" id="r-copy">Copiar para Excel</button></div></div>
+      <div class="row"><button class="b p" id="r-xlsx">Baixar planilha (modelo Controle de FVS)</button><button class="b" id="r-copy">Copiar para Excel</button></div></div>
       <div class="muted">${Object.entries(c).map(([k, n]) => `${n} ${SIT[k].toLowerCase()}`).join(' · ')}</div>
       ${REL.naoEntendi && REL.naoEntendi.length ? `<div class="warn">${REL.naoEntendi.map(esc).join('<br>')}</div>` : ''}
       <table><tr>${REL.tipo === 'ppc' ? '<th>Linha da lona</th>' : ''}<th>Torre</th><th>Local</th><th>FVS</th><th>Situação</th>${REL.tipo === 'ppc' ? '<th>Aberta?</th>' : ''}<th>Itens</th><th>Responsável</th><th>Abertura</th><th>Encerramento</th></tr>
       ${REL.linhas.map((x) => `<tr class="${x.sit === 'fin' ? 'ok' : ['sem', 'vni'].includes(x.sit) ? 'pend' : ''}">${REL.tipo === 'ppc' ? `<td>${esc(x.origem)}</td>` : ''}<td>${esc(x.torre)}</td><td>${esc(localCurto(x.area))}</td><td>${esc(x.cod.replace('FVS ', ''))} ${esc(nomeLimpo(x.cod))}</td><td>${esc(SIT[x.sit])}${x.rx ? ' · R/X' : ''}</td>${REL.tipo === 'ppc' ? `<td><b>${abertaTxt(x.sit)}</b></td>` : ''}<td>${esc(x.itens)}</td><td>${esc(x.inspetor)}</td><td>${esc(x.abertura)}</td><td>${esc(x.encerramento)}</td></tr>`).join('')}</table>`;
   }
   function ligarBotoesRel() {
-    const p = $('#r-print'); if (p) p.onclick = abrirImpressao;
+    const p = $('#r-xlsx'); if (p) p.onclick = () => { try { baixarPlanilha(); } catch (e) { status('Erro ao montar a planilha: ' + e.message); } };
     const c = $('#r-copy'); if (c) c.onclick = () => {
       const tsv = [['Torre', 'Local', 'FVS', 'Serviço', 'Situação', REL.tipo === 'ppc' ? 'Aberta?' : null, 'Itens', 'Responsável', 'Abertura', 'Encerramento'].filter((x) => x !== null).join('\t')]
         .concat(REL.linhas.map((x) => [x.torre, localCurto(x.area), x.cod, nomeLimpo(x.cod), SIT[x.sit] + (x.rx ? ' · R/X' : ''), REL.tipo === 'ppc' ? abertaTxt(x.sit) : null, x.itens, x.inspetor, x.abertura, x.encerramento].filter((v) => v !== null).join('\t'))).join('\n');
       navigator.clipboard.writeText(tsv).then(() => status('Copiado. Cole no Excel ou no Google Planilhas.'), () => status('Não deu para copiar.'));
     };
   }
-  function abrirImpressao() {
-    const grupos = {};
-    REL.linhas.forEach((x) => { const k = x.cod + '|' + x.torre; (grupos[k] = grupos[k] || []).push(x); });
-    const cor = { fin: '#2f9a5a', enc: '#3b7dd8', ini: '#e3a21a', vni: '#d2463c', sem: '#d2463c', none: '#9aa6b2' };
-    const total = contarSit(REL.linhas);
-    const html = `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>${esc(REL.titulo)} · ${esc(CFG.obraNome)}</title><style>
-      @page{size:A4;margin:14mm}
-      body{font:12px/1.45 "Segoe UI",Arial,sans-serif;color:#14213d;margin:0;background:#fff}
-      header{background:#001e44;color:#fff;padding:18px 22px;display:flex;justify-content:space-between;align-items:center;gap:16px;-webkit-print-color-adjust:exact;print-color-adjust:exact}
-      header img{height:44px} header h1{margin:0;font-size:20px} header p{margin:2px 0 0;color:#b9c6dd;font-size:12px}
-      main{padding:18px 22px} h2{font-size:14px;margin:22px 0 6px;border-left:4px solid #6d3fd1;padding-left:8px}
-      .resumo{display:flex;flex-wrap:wrap;gap:8px;margin:4px 0 6px}
-      .pill{border-radius:20px;padding:3px 10px;color:#fff;font-weight:700;font-size:11px;-webkit-print-color-adjust:exact;print-color-adjust:exact}
-      table{border-collapse:collapse;width:100%;margin-top:4px} th{background:#eef1f6;text-align:left;font-size:10.5px;text-transform:uppercase;letter-spacing:.04em;-webkit-print-color-adjust:exact;print-color-adjust:exact}
-      td,th{border:1px solid #dfe4ec;padding:4px 6px;vertical-align:top} tr{break-inside:avoid}
-      .st{font-weight:700} .rodape{margin-top:24px;color:#64708a;font-size:10.5px;border-top:1px solid #dfe4ec;padding-top:8px}
-      .acoes{display:flex;justify-content:flex-end;margin-bottom:6px} .acoes button{background:#6d3fd1;color:#fff;border:0;border-radius:8px;padding:9px 14px;font:600 13px "Segoe UI",sans-serif;cursor:pointer}
-      @media print{.acoes{display:none}}
-    </style></head><body>
-      <header><div><h1>${esc(REL.titulo)}</h1><p>${esc(CFG.obraNome)} · ${esc(REL.subtitulo)}</p><p>Gerado em ${new Date().toLocaleString('pt-BR')} a partir do SGQ · Prisma</p></div><img src="${LOGO}" alt="Realiza Construtora"></header>
-      <main>
-        <div class="acoes"><button onclick="window.print()">Imprimir / salvar PDF</button></div>
-        <div class="resumo">${Object.entries(total).map(([k, n]) => `<span class="pill" style="background:${cor[k]}">${n} ${esc(SIT[k])}</span>`).join('')}</div>
-        ${REL.naoEntendi && REL.naoEntendi.length ? `<p><b>Linhas da lona sem FVS ou não reconhecidas:</b><br>${REL.naoEntendi.map(esc).join('<br>')}</p>` : ''}
-        ${Object.entries(grupos).map(([k, L]) => { const [cod, torre] = k.split('|'); const c = contarSit(L);
-          return `<h2>${esc(cod)} · ${esc(nomeLimpo(cod))} · ${esc(torre)}</h2><div class="resumo">${Object.entries(c).map(([s, n]) => `<span class="pill" style="background:${cor[s]}">${n} ${esc(SIT[s])}</span>`).join('')}</div>
-          <table><tr>${REL.tipo === 'ppc' ? '<th>Linha da lona</th>' : ''}<th>Local</th><th>Situação</th>${REL.tipo === 'ppc' ? '<th>Aberta?</th>' : ''}<th>Itens</th><th>Responsável</th><th>Abertura</th><th>Encerramento</th></tr>
-          ${L.map((x) => `<tr>${REL.tipo === 'ppc' ? `<td>${esc(x.origem)}</td>` : ''}<td>${esc(localCurto(x.area))}</td><td class="st" style="color:${cor[x.sit]}">${esc(SIT[x.sit])}${x.rx ? ' · R/X' : ''}</td>${REL.tipo === 'ppc' ? `<td><b>${abertaTxt(x.sit)}</b></td>` : ''}<td>${esc(x.itens)}</td><td>${esc(x.inspetor)}</td><td>${esc(x.abertura)}</td><td>${esc(x.encerramento)}</td></tr>`).join('')}</table>`; }).join('')}
-        <div class="rodape">Situação: Finalizada = FVS finalizada no SGQ · Encerrada = verificação encerrada, falta finalizar a FVS · Iniciada = verificação em andamento · Não iniciada = ficha criada sem itens · Sem ficha = nenhuma verificação aberta. R/X = item com retrabalho ou reprovação.</div>
-      </main></body></html>`;
-    const w = window.open('', '_blank');
-    if (!w) return status('O navegador bloqueou a nova aba. Permita pop-ups para o SGQ e tente de novo.');
-    w.document.open(); w.document.write(html); w.document.close();
+  // ------------------------------ PLANILHA (modelo CONTROLE DE FVS) ------------------------------
+  // Gera um .xlsx igual ao controle da qualidade: abas "Registro de FVS", "Dashboard" e "Categorias de Serviços".
+  // Montado aqui mesmo (zip sem compressão + XML do Excel), sem biblioteca de fora.
+  const CATEG = {
+    'FVS 006 A': 'Alvenaria Estrutural', 'FVS 006 C1': 'Alvenaria de Vedação', 'FVS 007': 'Chapisco', 'FVS 008 B': 'Fiação', 'FVS 008 C': 'Módulos/Acabamento',
+    'FVS 009 A': 'Hidráulica', 'FVS 009 B': 'Sanitária', 'FVS 009 C': 'Gás', 'FVS 011 B': 'PORTA DE MADEIRA', 'FVS 013 A': 'Reboco', 'FVS 013 B': 'Reboco externo',
+    'FVS 014 A': 'Gesso', 'FVS 014 B': 'Forro', 'FVS 014 C': 'SHAFT - ACARTONADO', 'FVS 015': 'Regularização', 'FVS 016 A': 'Revestimento', 'FVS 016 B': 'Rejunte',
+    'FVS 017 A1': 'Bancada', 'FVS 017 B': 'LOUÇAS', 'FVS 017 C': 'METAIS', 'FVS 017 D': 'TANQUES', 'FVS 017 E': 'Balcão', 'FVS 019 A': 'CORRIMÃO', 'FVS 019 C': 'Guarda-corpo',
+    'FVS 020 A': 'PINTURA', 'FVS 020 B': 'PINTURA 2º DEMÃO', 'FVS 020 E': 'Textura', 'FVS 021 A': 'Impermeabilização', 'FVS 021 B': 'Impermeabilização de janela',
+    'FVS 028 A': 'Esquadrias', 'FVS 028 B': 'Contramarco', 'FVS 028 D': 'Porta de aluminio', 'FVS 033 A': 'Peitoril', 'FVS 033 B': 'BIT',
+  };
+  const categoria = (cod) => CATEG[cod] || nomeLimpo(cod).replace(/\s*\(.*$/, '').slice(0, 40);
+  // Apelidos usados na planilha da qualidade do Varandas; nas outras obras vai o primeiro nome.
+  const APELIDOS = ['AISSA', 'ANA LAURA', 'JOÃO VITOR', 'NETO', 'THAIANE', 'ALISSON', 'ANDRESA', 'ANA CLARA', 'RAMOS', 'VITOR', 'MARCELO', 'YURI'];
+  function apelido(nome) {
+    const pal = norm(semAc(nome)).split(' ').filter(Boolean); if (!pal.length) return '';
+    if (CFG.idObra === 2064) { const a = APELIDOS.filter((x) => norm(semAc(x)).split(' ').every((w) => pal.includes(w))).sort((x, y) => y.length - x.length)[0]; if (a) return a; }
+    return norm(nome).split(' ')[0];
+  }
+  const pavTxt = (n) => (n <= 0 ? 'TERREO' : n + '°');
+  const STATUS_PL = { fin: 'ENCERRADA', enc: 'ENCERRADA', ini: 'INICIADA', vni: 'SEM INICIAR', sem: 'SEM INICIAR', none: '' };
+  function linhaPlanilha(x) {
+    const p = lerArea(x.area), T = torreDe(x.area);
+    let pav, ap = '';
+    if (p.tipo === 'un') { pav = p.andar ? pavTxt(p.andar + ((T && +T.hall) || 0)) : ''; ap = p.num; }
+    else if (p.tipo === 'hall') { pav = pavTxt(p.pav); ap = 'HALL'; }
+    else pav = localCurto(x.area).toUpperCase();
+    const obs = [x.cod, x.sit === 'enc' ? 'falta finalizar a FVS' : '', x.sit === 'none' ? 'FVS não existe no local' : '', x.rx ? 'R/X em aberto' : '',
+      x.itens && x.sit !== 'fin' ? x.itens + ' itens' : '', x.abertura ? 'aberta ' + x.abertura : '', x.encerramento ? 'encerrada ' + x.encerramento : '', x.origem ? 'PPC: ' + x.origem : ''].filter(Boolean).join(' · ');
+    return [x.torre || p.bloco, pav, ap, categoria(x.cod), apelido(x.inspetor), STATUS_PL[x.sit] || '', obs];
+  }
+
+  // zip "store" (sem compressão), suficiente para o Excel abrir
+  const CRC = (() => { const t = new Uint32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; } return t; })();
+  const crc32 = (b) => { let c = 0xffffffff; for (let i = 0; i < b.length; i++) c = CRC[(c ^ b[i]) & 255] ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0; };
+  function zipStore(arqs) {
+    const enc = new TextEncoder(), partes = [], central = []; let pos = 0;
+    const u16 = (v) => [v & 255, (v >>> 8) & 255], u32 = (v) => [v & 255, (v >>> 8) & 255, (v >>> 16) & 255, (v >>> 24) & 255];
+    for (const [nome, txt] of arqs) {
+      const n = enc.encode(nome), d = enc.encode(txt), c = crc32(d);
+      const comum = [...u16(20), ...u16(0x0800), ...u16(0), ...u16(0), ...u16(0x21), ...u32(c), ...u32(d.length), ...u32(d.length), ...u16(n.length), ...u16(0)];
+      const loc = new Uint8Array([...u32(0x04034b50), ...comum]);
+      partes.push(loc, n, d);
+      central.push(new Uint8Array([...u32(0x02014b50), ...u16(20), ...comum, ...u16(0), ...u16(0), ...u16(0), ...u32(0), ...u32(pos)]), n);
+      pos += loc.length + n.length + d.length;
+    }
+    const tamC = central.reduce((s, b) => s + b.length, 0);
+    const fim = new Uint8Array([...u32(0x06054b50), ...u16(0), ...u16(0), ...u16(arqs.length), ...u16(arqs.length), ...u32(tamC), ...u32(pos), ...u16(0)]);
+    return new Blob([...partes, ...central, fim], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+  }
+
+  const xe = (s) => String(s ?? '').replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const colL = (i) => String.fromCharCode(65 + i);
+  // célula: número, texto ou fórmula ({f, v}); s = índice do estilo (cellXfs abaixo)
+  function cel(ref, v, s) {
+    if (v && typeof v === 'object') return `<c r="${ref}" s="${s}"><f>${xe(v.f)}</f><v>${v.v}</v></c>`;
+    if (typeof v === 'number') return `<c r="${ref}" s="${s}"><v>${v}</v></c>`;
+    return v === '' || v == null ? `<c r="${ref}" s="${s}"/>` : `<c r="${ref}" s="${s}" t="inlineStr"><is><t xml:space="preserve">${xe(v)}</t></is></c>`;
+  }
+  const NS = 'xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"';
+  // estilos: 0 normal · 1 cabeçalho azul · 2 célula com borda centralizada · 3 observação · 4 título · 5 seção · 6 rótulo · 7 número · 8/9/10 cabeçalhos coloridos · 11 célula da tabela
+  const ESTILOS = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet ${NS}>
+<fonts count="5"><font><sz val="11"/><name val="Calibri"/><family val="2"/></font><font><b/><sz val="11"/><color rgb="FFFFFFFF"/><name val="Calibri"/><family val="2"/></font><font><b/><sz val="26"/><color rgb="FFC00000"/><name val="Calibri"/><family val="2"/></font><font><b/><sz val="12"/><name val="Calibri"/><family val="2"/></font><font><b/><sz val="11"/><name val="Calibri"/><family val="2"/></font></fonts>
+<fills count="6"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FF1F4E79"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FFFF0000"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FFFFFF00"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FF92D050"/></patternFill></fill></fills>
+<borders count="3"><border><left/><right/><top/><bottom/><diagonal/></border><border><left style="thin"><color auto="1"/></left><right style="thin"><color auto="1"/></right><top style="thin"><color auto="1"/></top><bottom style="thin"><color auto="1"/></bottom><diagonal/></border><border><left style="medium"><color indexed="64"/></left><right style="medium"><color indexed="64"/></right><top style="medium"><color indexed="64"/></top><bottom style="medium"><color indexed="64"/></bottom><diagonal/></border></borders>
+<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
+<cellXfs count="12"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>
+<xf numFmtId="0" fontId="1" fillId="2" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>
+<xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>
+<xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1" applyAlignment="1"><alignment horizontal="left" vertical="center"/></xf>
+<xf numFmtId="0" fontId="2" fillId="0" borderId="0" xfId="0" applyFont="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>
+<xf numFmtId="0" fontId="3" fillId="0" borderId="2" xfId="0" applyFont="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>
+<xf numFmtId="0" fontId="4" fillId="0" borderId="2" xfId="0" applyFont="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>
+<xf numFmtId="0" fontId="0" fillId="0" borderId="2" xfId="0" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>
+<xf numFmtId="0" fontId="4" fillId="3" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>
+<xf numFmtId="0" fontId="4" fillId="4" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>
+<xf numFmtId="0" fontId="4" fillId="5" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>
+<xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1"/></cellXfs>
+<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>
+<dxfs count="3"><dxf><fill><patternFill><bgColor rgb="FF92D050"/></patternFill></fill></dxf><dxf><fill><patternFill><bgColor rgb="FFFFFF00"/></patternFill></fill></dxf><dxf><fill><patternFill><bgColor rgb="FFFF0000"/></patternFill></fill></dxf></dxfs>
+</styleSheet>`;
+
+  function planilhaXlsx(linhasRel) {
+    const L = linhasRel.map(linhaPlanilha);
+    const CAB = ['BLOCO', 'Pavimento', 'Apartamento', 'Categoria de Serviço', 'Responsável', 'Status', 'Observações'];
+    const n = L.length + 1; // última linha com dados
+    // Registro de FVS
+    const reg = [`<row r="1">${CAB.map((t, i) => cel(colL(i) + 1, t, 1)).join('')}</row>`]
+      .concat(L.map((r, k) => `<row r="${k + 2}">${r.map((v, i) => cel(colL(i) + (k + 2), v, i === 6 ? 3 : 2)).join('')}</row>`));
+    const uniq = (i) => [...new Set(L.map((r) => r[i]).filter((v) => v !== ''))];
+    const blocos = uniq(0), pavs = uniq(1).sort((a, b) => (parseInt(a, 10) || (a === 'TERREO' ? 0 : 99)) - (parseInt(b, 10) || (b === 'TERREO' ? 0 : 99))), cats = uniq(3), resp = uniq(4).sort(), stats = ['ENCERRADA', 'INICIADA', 'SEM INICIAR'];
+    const CS = "'Categorias de Serviços'";
+    const lista = (col, arr) => `${CS}!$${col}$2:$${col}$${Math.max(2, arr.length + 1)}`;
+    const dv = [['A', 'I', blocos], ['B', 'G', pavs], ['D', 'A', cats], ['E', 'C', resp], ['F', 'E', stats]]
+      .map(([c, src, arr]) => `<dataValidation type="list" allowBlank="1" showErrorMessage="1" sqref="${c}2:${c}${n + 500}"><formula1>${xe(lista(src, arr))}</formula1></dataValidation>`).join('');
+    const cf = [['SEM INICIAR', 2, 1], ['INICIADA', 1, 2], ['ENCERRADA', 0, 3]].map(([t, dxf, pr]) =>
+      `<cfRule type="containsText" dxfId="${dxf}" priority="${pr}" operator="containsText" text="${t}"><formula>NOT(ISERROR(SEARCH("${t}",F2)))</formula></cfRule>`).join('');
+    const sheet1 = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet ${NS}><dimension ref="A1:G${n}"/>
+<sheetViews><sheetView tabSelected="1" zoomScale="80" workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews><sheetFormatPr defaultRowHeight="14.4"/>
+<cols><col min="1" max="1" width="13.2" customWidth="1"/><col min="2" max="2" width="13.3" customWidth="1"/><col min="3" max="3" width="13.4" customWidth="1"/><col min="4" max="4" width="24" customWidth="1"/><col min="5" max="6" width="22" customWidth="1"/><col min="7" max="7" width="70" customWidth="1"/></cols>
+<sheetData>${reg.join('')}</sheetData><autoFilter ref="A1:G${n}"/><conditionalFormatting sqref="F2:F${n + 500}">${cf}</conditionalFormatting><dataValidations count="5">${dv}</dataValidations>
+<pageMargins left="0.5" right="0.5" top="0.75" bottom="0.75" header="0.3" footer="0.3"/><pageSetup paperSize="9" orientation="landscape"/></worksheet>`;
+    // Dashboard (fórmulas iguais às do modelo, já com o valor calculado)
+    const conta = (filtro) => L.filter(filtro).length;
+    const tem = (s, t) => String(s).includes(t);
+    const RG = "'Registro de FVS'";
+    const dRows = [
+      `<row r="1" ht="21" customHeight="1">${cel('A1', 'Controle de FVS - Obra: ' + (CFG.obraNome || ''), 4)}</row>`,
+      `<row r="3">${cel('A3', 'Gerado pelo Prisma em ' + new Date().toLocaleString('pt-BR') + ' a partir do SGQ', 0)}</row>`,
+      `<row r="5">${cel('A5', 'Resumo Geral de FVS', 5)}${cel('B5', '', 5)}${cel('C5', '', 5)}${cel('D5', '', 5)}</row>`,
+      ...[['Encerrada', 'ENCERRADA'], ['Iniciada', 'INICIADA'], ['Sem iniciar', 'SEM INICIAR']].map(([rot, t], k) =>
+        `<row r="${6 + k}">${cel('A' + (6 + k), rot, 6)}${cel('B' + (6 + k), { f: `COUNTIF(${RG}!F:F,"*${t}*")`, v: conta((r) => tem(r[5], t)) }, 7)}${cel('C' + (6 + k), '', 7)}${cel('D' + (6 + k), '', 7)}</row>`),
+      `<row r="11">${cel('A11', 'Serviço', 6)}${cel('B11', 'Sem iniciar', 8)}${cel('C11', 'Iniciada', 9)}${cel('D11', 'Encerradas', 10)}</row>`,
+      ...cats.map((c, k) => { const r = 12 + k; const q = (t) => ({ f: `COUNTIFS(${RG}!D:D,A${r},${RG}!F:F,"*${t}*")`, v: conta((x) => x[3] === c && tem(x[5], t)) });
+        return `<row r="${r}">${cel('A' + r, c, 11)}${cel('B' + r, q('SEM INICIAR'), 2)}${cel('C' + r, q('INICIADA'), 2)}${cel('D' + r, q('ENCERRADA'), 2)}</row>`; }),
+    ];
+    const sheet2 = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet ${NS}><sheetViews><sheetView workbookViewId="0"/></sheetViews><sheetFormatPr defaultRowHeight="14.4"/>
+<cols><col min="1" max="1" width="31" customWidth="1"/><col min="2" max="2" width="12" customWidth="1"/><col min="3" max="3" width="15" customWidth="1"/><col min="4" max="4" width="13" customWidth="1"/></cols>
+<sheetData>${dRows.join('')}</sheetData><mergeCells count="5"><mergeCell ref="A1:O2"/><mergeCell ref="A5:D5"/><mergeCell ref="B6:D6"/><mergeCell ref="B7:D7"/><mergeCell ref="B8:D8"/></mergeCells>
+<pageMargins left="0.75" right="0.75" top="1" bottom="1" header="0.5" footer="0.5"/></worksheet>`;
+    // Categorias de Serviços (listas das caixinhas de escolha)
+    const colsCat = [['A', 'Categoria de Serviço', cats], ['C', 'Responsável', resp], ['E', 'Status', stats], ['G', 'Pavimento', pavs], ['I', 'BLOCO', blocos]];
+    const maxN = Math.max(...colsCat.map((c) => c[2].length));
+    const cRows = [];
+    for (let r = 1; r <= maxN + 1; r++) cRows.push(`<row r="${r}">${colsCat.map(([c, t, arr]) => (r === 1 ? cel(c + r, t, 1) : arr[r - 2] != null ? cel(c + r, arr[r - 2], 11) : '')).join('')}</row>`);
+    const sheet3 = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet ${NS}><sheetViews><sheetView workbookViewId="0"/></sheetViews><sheetFormatPr defaultRowHeight="14.4"/>
+<cols><col min="1" max="1" width="34" customWidth="1"/><col min="3" max="3" width="23" customWidth="1"/><col min="5" max="5" width="18" customWidth="1"/><col min="7" max="7" width="20" customWidth="1"/><col min="9" max="9" width="20" customWidth="1"/></cols>
+<sheetData>${cRows.join('')}</sheetData><pageMargins left="0.75" right="0.75" top="1" bottom="1" header="0.5" footer="0.5"/></worksheet>`;
+    const R = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+    return zipStore([
+      ['[Content_Types].xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>${[1, 2, 3].map((i) => `<Override PartName="/xl/worksheets/sheet${i}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`).join('')}<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>`],
+      ['_rels/.rels', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${R}/officeDocument" Target="xl/workbook.xml"/></Relationships>`],
+      ['xl/workbook.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook ${NS}><bookViews><workbookView/></bookViews><sheets><sheet name="Registro de FVS" sheetId="1" r:id="rId1"/><sheet name="Dashboard" sheetId="2" r:id="rId2"/><sheet name="Categorias de Serviços" sheetId="3" r:id="rId3"/></sheets><definedNames><definedName name="_xlnm._FilterDatabase" localSheetId="0" hidden="1">'Registro de FVS'!$A$1:$G$${n}</definedName></definedNames><calcPr calcId="191029" fullCalcOnLoad="1"/></workbook>`],
+      ['xl/_rels/workbook.xml.rels', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${[1, 2, 3].map((i) => `<Relationship Id="rId${i}" Type="${R}/worksheet" Target="worksheets/sheet${i}.xml"/>`).join('')}<Relationship Id="rId4" Type="${R}/styles" Target="styles.xml"/></Relationships>`],
+      ['xl/styles.xml', ESTILOS],
+      ['xl/worksheets/sheet1.xml', sheet1], ['xl/worksheets/sheet2.xml', sheet2], ['xl/worksheets/sheet3.xml', sheet3],
+    ]);
+  }
+  function baixarPlanilha() {
+    if (!REL || !REL.linhas.length) return status('Gere o relatório primeiro.');
+    const d = new Date(), dia = `${String(d.getDate()).padStart(2, '0')}.${String(d.getMonth() + 1).padStart(2, '0')}`;
+    const nome = `CONTROLE DE FVS - ${(CFG.obraNome || 'obra').replace(/[\\/:*?"<>|]/g, ' ').trim()} - ${dia}${REL.tipo === 'ppc' ? ' - PPC' : ''}.xlsx`;
+    const a = document.createElement('a'); a.href = URL.createObjectURL(planilhaXlsx(REL.linhas)); a.download = nome;
+    document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 2000);
+    status(`Planilha baixada: ${nome} (${REL.linhas.length} linha(s)).`);
   }
 
   // ------------------------------ aba CONFIGURAÇÃO ------------------------------
