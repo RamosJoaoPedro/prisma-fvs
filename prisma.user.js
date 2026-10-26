@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Prisma - FVS no SGQ
 // @namespace    realiza-bot-fvs
-// @version      2.16
+// @version      2.17
 // @author       João Pedro Ramos
 // @description  Prisma: mapa das torres, fila de comandos, relatórios e preenchimento de FVS no SGQ da Realiza, com travas de segurança. Usa o login do próprio usuário no SGQ.
 // @match        https://gdol.sgq2.com.br/*
@@ -17,7 +17,7 @@
 
   // ============================== CONFIGURAÇÃO PADRÃO ==============================
   // Tudo aqui pode ser trocado pela aba "Configuração" do painel (fica salvo no navegador).
-  const VERSAO = '2.16';
+  const VERSAO = '2.17';
   const CANAL = 'oficial'; // 'oficial' ou 'teste' (o arquivo prisma-teste.user.js usa 'teste')
   const PADRAO = {
     obraNome: '', idObra: null,
@@ -28,6 +28,7 @@
     descricaoPadrao: 'Item não conforme na 1ª inspeção: ',
     tratativaPadrao: 'Retrabalho executado e conferido na 2ª inspeção.',
     pausaMs: 400,
+    leiturasJuntas: 3,     // consultas ao SGQ ao mesmo tempo ao ler o mapa e os relatórios (gravação é sempre uma por vez)
   };
   // Gabarito de fábrica da obra 054 Varandas Carioca (vale só para ela). Itens NA por FVS (aptos / por torre / hall) e "pre" = até qual item marca ao ABRIR (pré-requisitos).
   const GAB_PADRAO = {
@@ -119,11 +120,25 @@
   const avisoHtml = () => { const a = AVISO || {}; const b = bloqueio(); if (b) return `<div class="aviso-c bloq">${esc(b)}</div>`; return a.mensagem ? `<div class="aviso-c">${esc(a.mensagem)}</div>` : ''; };
 
   async function api(method, path, body) {
-    await sleep(CFG.pausaMs);
-    const r = await fetchOrig(API + path, { method, headers: cabecalhos(true), body: body ? JSON.stringify(body) : undefined });
-    const t = await r.text(); let j = null; try { j = JSON.parse(t); } catch (e) {}
-    if (r.status === 401) throw new Error('Sessão expirada: faça login de novo no SGQ e rode outra vez.');
-    return { st: r.status, j, t };
+    for (let tent = 1; ; tent++) {
+      await sleep(CFG.pausaMs);
+      const r = await fetchOrig(API + path, { method, headers: cabecalhos(true), body: body ? JSON.stringify(body) : undefined });
+      // SGQ pediu para ir mais devagar (429 = recusou sem gravar nada): espera e tenta de novo, até 3 vezes.
+      // Outros erros não repetem: um 503 pode chegar depois de o SGQ já ter gravado, e repetir duplicaria a ficha.
+      if (r.status === 429 && tent < 3) { await sleep(2000 * tent); continue; }
+      const t = await r.text(); let j = null; try { j = JSON.parse(t); } catch (e) {}
+      if (r.status === 401) throw new Error('Sessão expirada: faça login de novo no SGQ e rode outra vez.');
+      return { st: r.status, j, t };
+    }
+  }
+  // Lê vários locais ao mesmo tempo (só consultas). Gravar no SGQ continua sendo uma ficha por vez, na fila.
+  // Para no primeiro erro que escapar de fn (ex.: sessão expirada) e, se parar=true, quando o usuário clica em Parar.
+  async function emParalelo(lista, fn, { parar = true } = {}) {
+    let prox = 0, erro = null;
+    const n = Math.max(1, Math.min(+CFG.leiturasJuntas || 3, 6, lista.length));
+    const trab = async () => { while (!erro && !(parar && PARAR) && prox < lista.length) { const k = prox++; try { await fn(lista[k], k); } catch (e) { erro = erro || e; } } };
+    await Promise.all(Array.from({ length: n }, trab));
+    if (erro) throw erro;
   }
   const msgErro = (r) => (r.j && r.j.message ? [].concat(r.j.message).join(' ') : (r.t || '').slice(0, 200)) || ('HTTP ' + r.st);
 
@@ -591,12 +606,11 @@
   async function atualizarTorre(T) {
     const { todas } = estruturaTorre(T);
     let i = 0;
-    for (const n of todas) {
-      if (PARAR) break;
-      i++; status(`Lendo a ${T.nome} no SGQ: ${i}/${todas.length} (${n.replace(T.bloco + ' - ', '')})`);
+    await emParalelo(todas, async (n) => {
       try { await atualizarArea(n); } catch (e) { if (/Sessão expirada/.test(e.message)) throw e; }
+      i++; status(`Lendo a ${T.nome} no SGQ: ${i}/${todas.length} (${n.replace(T.bloco + ' - ', '')})`);
       if (i % 20 === 0) { salvarMapa(); renderMapa(); }
-    }
+    });
     // Parou no meio: não marca a torre como lida, senão o mapa fica incompleto parecendo atualizado.
     if (i < todas.length) { salvarMapa(); status(`Leitura da ${T.nome} interrompida em ${i}/${todas.length}. Clique em "Atualizar ${T.nome}" para ler tudo.`); return; }
     MAPA.ts[T.nome] = new Date().toISOString(); salvarMapa(); LS.set(K('nomes'), NOMES);
@@ -820,7 +834,7 @@
     if (!simular) {
       FILA = FILA.filter((g) => g.areas.length); salvarFila();
       status('Atualizando o mapa dos locais gravados...');
-      for (const a of feitos) { try { await atualizarArea(a); } catch (e) {} }
+      await emParalelo([...feitos], async (a) => { try { await atualizarArea(a); } catch (e) {} }, { parar: false }); // mesmo depois de Parar, atualiza o que foi gravado
       salvarMapa();
     }
     const ok = RESULT.filter((x) => x.resultado === 'OK').length;
@@ -1085,14 +1099,13 @@
       est.ordem.forEach((n) => ordem.push(n));
       est.outros.forEach((n) => ordem.push(n));
       S.relServ.forEach((c) => ordem.filter((n) => MAPA.areas[n] && MAPA.areas[n].fvs[c]).sort((a, b) => a.localeCompare(b, 'pt', { numeric: true })).forEach((n) => alvo.push([n, c]))); }
-    for (let i = 0; i < alvo.length; i++) {
-      if (PARAR) break;
-      const [n, c] = alvo[i];
-      const e = MAPA.areas[n].fvs[c];
-      if (S.relFiltro === 'pend' && e[1] === 1) continue;
-      status(`Montando relatório: ${i + 1}/${alvo.length} (${localComTorre(n)} · ${c})`);
-      linhas.push(await situacaoDetalhada(n, c, ler && e[1] !== 1));
-    }
+    const lista = alvo.filter(([n, c]) => !(S.relFiltro === 'pend' && MAPA.areas[n].fvs[c][1] === 1));
+    const res = []; let feitos = 0; // res[k] na mesma ordem da lista, mesmo lendo várias fichas ao mesmo tempo
+    await emParalelo(lista, async ([n, c], k) => {
+      res[k] = await situacaoDetalhada(n, c, ler && MAPA.areas[n].fvs[c][1] !== 1);
+      feitos++; status(`Montando relatório: ${feitos}/${lista.length} (${localComTorre(n)} · ${c})`);
+    });
+    res.forEach((x) => { if (x) linhas.push(x); });
     REL = { tipo: 'fvs', titulo: 'Relatório de FVS', subtitulo: `${S.relServ.map((c) => c.replace('FVS ', '') + ' ' + nomeLimpo(c)).join(' · ')} · ${torres.map((t) => t.nome).join(' e ')}${S.relFiltro === 'pend' ? ' · só não finalizadas' : ''}`, linhas };
     status(`Relatório pronto: ${linhas.length} linha(s).`); renderRel();
   }
@@ -1101,12 +1114,19 @@
     PARAR = false; await garantirMapa(CFG.torres);
     const linhas = [], naoEntendi = [];
     const L = (S.relPpc || '').split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
+    const lista = [];
     for (const l of L) {
       const r = lerLinhaPpc(l);
       if (!r.servico) { naoEntendi.push(l + ' → serviço sem FVS ou não reconhecido'); continue; }
       if (!r.locais.length) { naoEntendi.push(l + ' → não achei os apartamentos'); continue; }
-      for (const n of r.locais) { status(`Conferindo ${localComTorre(n)} · ${r.servico}`); const s = await situacaoDetalhada(n, r.servico, true); s.origem = l; linhas.push(s); }
+      r.locais.forEach((n) => lista.push([n, r.servico, l]));
     }
+    const res = []; let feitos = 0;
+    await emParalelo(lista, async ([n, cod, l], k) => {
+      const s = await situacaoDetalhada(n, cod, true); s.origem = l; res[k] = s;
+      feitos++; status(`Conferindo ${feitos}/${lista.length}: ${localComTorre(n)} · ${cod}`);
+    });
+    res.forEach((x) => { if (x) linhas.push(x); });
     REL = { tipo: 'ppc', titulo: 'Conferência de FVS do PPC', subtitulo: `PPC de ${fmt(S.relDppc || hojeStr())} · ${L.length} linha(s) da lona`, linhas, naoEntendi };
     status(`Conferência pronta: ${linhas.length} ficha(s) conferida(s).`); renderRel();
   }
@@ -1358,7 +1378,8 @@
       ${funcs.length ? `<div class="row"><button class="b" id="k-func">Atualizar lista de funcionários</button></div>` : (obraAtualId ? `<div class="warn">Buscando a lista de funcionários da obra... <button class="b" id="k-func">Buscar de novo</button></div>` : '<div class="muted">Escolha a obra para aparecer a lista de funcionários.</div>')}
       <label>Assumir fichas de (um nome por linha: ex-funcionários ou colegas que autorizaram; o Prisma só assume quando você marca a opção no Mapa)<textarea id="k-ex" style="min-height:70px">${esc(CFG.exFuncionarios.join('\n'))}</textarea></label>
       <label>Tratativa padrão (usada na 2ª inspeção quando você não escreve uma)<input id="k-trat" value="${esc(CFG.tratativaPadrao)}"></label>
-      <details><summary>Avançado</summary><label style="margin-top:8px;max-width:240px">Pausa entre consultas ao SGQ (ms)<input id="k-pausa" type="number" min="200" value="${esc(CFG.pausaMs)}"></label></details>
+      <details><summary>Avançado</summary><label style="margin-top:8px;max-width:240px">Pausa entre consultas ao SGQ (ms)<input id="k-pausa" type="number" min="200" value="${esc(CFG.pausaMs)}"></label>
+        <label style="margin-top:8px;max-width:340px">Consultas ao mesmo tempo ao ler mapa e relatórios (1 a 6; gravar é sempre uma por vez)<input id="k-par" type="number" min="1" max="6" value="${esc(CFG.leiturasJuntas || 3)}"></label></details>
       <div class="row"><button class="b p" id="k-salva">Salvar configuração</button><button class="b" id="k-reset">Voltar ao padrão</button></div></div>${perfilHtml()}`;
     ligarPerfil((D) => {
       if (+D.idObra !== +CFG.idObra) return status('Esse diagnóstico é de outra obra. Salve a configuração com ela primeiro.');
@@ -1398,6 +1419,7 @@
         exFuncionarios: $('#k-ex').value.split(/\r?\n/).map((x) => x.trim()).filter(Boolean),
         tratativaPadrao: $('#k-trat').value.trim() || PADRAO.tratativaPadrao,
         pausaMs: Math.max(200, +$('#k-pausa').value || 400),
+        leiturasJuntas: Math.min(6, Math.max(1, Math.round(+$('#k-par').value) || 3)),
         escuro: $('#k-escuro').checked,
       });
       if (!idObra) return status('Escolha a obra (clique em "Buscar as obras do meu login").');
