@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Prisma - FVS no SGQ
 // @namespace    realiza-bot-fvs
-// @version      2.18
+// @version      2.19
 // @author       João Pedro Ramos
 // @description  Prisma: mapa das torres, fila de comandos, relatórios e preenchimento de FVS no SGQ da Realiza, com travas de segurança. Usa o login do próprio usuário no SGQ.
 // @match        https://gdol.sgq2.com.br/*
@@ -17,7 +17,7 @@
 
   // ============================== CONFIGURAÇÃO PADRÃO ==============================
   // Tudo aqui pode ser trocado pela aba "Configuração" do painel (fica salvo no navegador).
-  const VERSAO = '2.18';
+  const VERSAO = '2.19';
   const CANAL = 'teste'; // 'oficial' ou 'teste' (o arquivo prisma-teste.user.js usa 'teste')
   const PADRAO = {
     obraNome: '', idObra: null,
@@ -53,9 +53,29 @@
   const GABP = () => (CFG.idObra === 2064 ? GAB_PADRAO : {});
   const configurado = () => !!(CFG.idObra && CFG.idInspecionado && CFG.idAprovado && CFG.torres && CFG.torres.length);
   const API = 'https://gdolproducao-api.sgq2.com.br/api';
+  // ------------------------------ cópia de segurança (IndexedDB) ------------------------------
+  // O SGQ apaga o localStorage inteiro quando a sessão cai ou a pessoa sai (localStorage.clear() no logout dele),
+  // e era lá que ficavam configuração, gabaritos, "assumir fichas de", fila e mapa. Agora cada gravação também vai
+  // para o IndexedDB do navegador, que o SGQ não mexe, e o que sumir do localStorage volta sozinho.
+  const BK = { db: null };
+  const bkPronto = new Promise((res) => {
+    try { const r = indexedDB.open('prisma-fvs', 1); r.onupgradeneeded = () => r.result.createObjectStore('kv'); r.onsuccess = () => { BK.db = r.result; res(); }; r.onerror = r.onblocked = () => res(); } catch (e) { res(); }
+  });
+  const bkSet = (k, txt) => bkPronto.then(() => { try { if (BK.db) BK.db.transaction('kv', 'readwrite').objectStore('kv').put(txt, k); } catch (e) {} });
+  const bkTudo = () => bkPronto.then(() => new Promise((res) => {
+    const out = {}; if (!BK.db) return res(out);
+    try { const c = BK.db.transaction('kv').objectStore('kv').openCursor(); c.onsuccess = () => { const cur = c.result; if (!cur) return res(out); out[cur.key] = cur.value; cur.continue(); }; c.onerror = () => res(out); } catch (e) { res(out); }
+  }));
+  // Devolve ao localStorage as chaves do Prisma que sumiram e manda para a cópia as que ainda não estão nela. Retorna quantas voltaram.
+  async function sincronizarCopia() {
+    const T = await bkTudo(); let volta = 0;
+    for (const [k, v] of Object.entries(T)) { try { if (localStorage.getItem(k) === null) { localStorage.setItem(k, v); volta++; } } catch (e) {} }
+    try { for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); if (k && k.startsWith('botFvs2_') && T[k] === undefined) bkSet(k, localStorage.getItem(k)); } } catch (e) {}
+    return volta;
+  }
   const LS = {
     get: (k, d) => { try { const v = JSON.parse(localStorage.getItem('botFvs2_' + k)); return v ?? d; } catch (e) { return d; } },
-    set: (k, v) => { try { localStorage.setItem('botFvs2_' + k, JSON.stringify(v)); return true; } catch (e) { setTimeout(() => avisoEspaco(k), 0); return false; } },
+    set: (k, v) => { const txt = JSON.stringify(v); bkSet('botFvs2_' + k, txt); try { localStorage.setItem('botFvs2_' + k, txt); return true; } catch (e) { setTimeout(() => avisoEspaco(k), 0); return false; } },
   };
   // O navegador guarda pouco por site (uns 5 MB). Se encher, avisa em vez de perder os dados calado.
   function avisoEspaco(k) { status(`Atenção: o navegador ficou sem espaço e não salvou "${String(k).replace(/_\d+$/, '')}". Apague dias antigos na aba Histórico ou planos que não usa mais.`); }
@@ -100,7 +120,11 @@
 
   let PARAR = false;
   let RODANDO = false; // fila rodando: trava outro "Executar" e o que mexe na fila até terminar
-  const ocupado = () => { if (RODANDO) status('Espere a fila terminar (ou clique em Parar na aba Fila) antes de fazer isso.'); return RODANDO; };
+  let LENDO = false;   // relatório, painel ou PPC lendo o SGQ (aba Relatório/Qualidade, que tem o próprio Parar)
+  const ocupado = () => {
+    const m = RODANDO ? 'Espere a fila terminar (ou clique em Parar na aba Fila) antes de fazer isso.' : LENDO ? 'Espere o relatório terminar (ou clique em Parar na aba Relatório/Qualidade).' : '';
+    if (m) status(m); return !!m;
+  };
 
   // ------------------------------ aviso central (GitHub) ------------------------------
   // aviso.json no repositório: { "manutencao": true/false, "mensagem": "...", "versaoMinima": "2.12" }
@@ -303,7 +327,25 @@
   }
 
   // ---------------------------------- motor de gravação ----------------------------------
-  const podeAssumir = (nome) => CFG.exFuncionarios.some((n) => norm(nome).startsWith(norm(n)));
+  // "Yuri Rodrigues" vale para "YURI GALDIANO RODRIGUES": o primeiro nome tem que bater e as outras palavras digitadas
+  // precisam estar no nome completo (acento e maiúscula não importam). O começo do nome ("Yuri Galdiano") continua valendo.
+  const palavrasNome = (s) => norm(semAc(s)).split(' ').filter((w) => w && !['DA', 'DE', 'DO', 'DAS', 'DOS', 'E'].includes(w));
+  const nomeBate = (digitado, completo) => {
+    if (!norm(digitado)) return false;
+    if (norm(semAc(completo)).startsWith(norm(semAc(digitado)))) return true;
+    const a = palavrasNome(digitado), b = palavrasNome(completo);
+    return a.length >= 2 && a[0] === b[0] && a.every((w) => b.includes(w));
+  };
+  const podeAssumir = (nome) => CFG.exFuncionarios.some((n) => nomeBate(n, nome));
+  // Mostra, na Configuração, com quem cada nome da lista "Assumir fichas de" bate.
+  function conferirEx(L, funcs) {
+    if (!L.length) return '';
+    if (!funcs.length) return 'A lista de funcionários ainda não carregou: o nome é conferido na hora de assumir a ficha.';
+    return L.map((n) => { const m = funcs.filter((f) => nomeBate(n, f.nome));
+      if (m.length === 1) return `✓ ${esc(n)} → <b>${esc(m[0].nome)}</b>`;
+      if (m.length) return `⚠ ${esc(n)} bate com ${m.length} pessoas (${m.slice(0, 4).map((f) => esc(f.nome)).join(', ')}${m.length > 4 ? '…' : ''}): escreva mais um sobrenome.`;
+      return `⚠ ${esc(n)}: não achei na lista de funcionários. Se for ex-funcionário, confira se o primeiro nome e um sobrenome estão como na ficha do SGQ.`; }).join('<br>');
+  }
   const OK = (msg) => ({ resultado: 'OK', msg });
   const PEND = (msg) => ({ resultado: 'PENDENTE', msg });
 
@@ -481,8 +523,12 @@
 
   // ---------------------------------- interface ----------------------------------
   const CSS = `
-  #bf2-btn{position:fixed;right:16px;bottom:16px;z-index:2147483000;background:#6d3fd1;color:#fff;border:0;border-radius:24px;padding:10px 18px;font:700 14px system-ui,"Segoe UI",sans-serif;letter-spacing:.04em;cursor:pointer;box-shadow:0 4px 14px #6d3fd166;display:flex;align-items:center;gap:8px}
-  #bf2-btn::before{content:"";width:14px;height:14px;background:conic-gradient(from 200deg,#b79bff,#fff,#6d3fd1,#b79bff);clip-path:polygon(50% 0,100% 100%,0 100%)}
+  #bf2-btn{position:fixed;right:20px;bottom:64px;z-index:2147483000;background:#6d3fd1;color:#fff;border:0;border-radius:28px;padding:13px 24px;font:700 16px system-ui,"Segoe UI",sans-serif;letter-spacing:.04em;cursor:pointer;box-shadow:0 6px 18px #6d3fd166;display:flex;align-items:center;gap:10px;transition:transform .15s,box-shadow .15s}
+  #bf2-btn:hover{transform:translateY(-2px);box-shadow:0 10px 24px #6d3fd188}
+  #bf2-btn::before{content:"";width:20px;height:20px;background:conic-gradient(from 200deg,#b79bff,#fff,#6d3fd1,#b79bff);clip-path:polygon(50% 0,100% 100%,0 100%)}
+  @keyframes bf2gira{0%{transform:rotate(0) scale(1)}60%{transform:rotate(300deg) scale(1.3)}100%{transform:rotate(360deg) scale(1)}}
+  #bf2-btn.gira::before,#bf2 .marca .ic.gira::before{animation:bf2gira .7s cubic-bezier(.3,.7,.3,1) var(--d,0ms) both}
+  @media (prefers-reduced-motion:reduce){#bf2-btn.gira::before,#bf2 .marca .ic.gira::before{animation:none}}
   #bf2{--nav:#001e44;--roxo:#6d3fd1;--roxo2:#5a2fbf;--roxoSoft:#efe9fd;--verm:#cd143e;--bg:#f3f5f9;--line:#dfe4ec;--ink:#14213d;--muted:#64708a;
     position:fixed;inset:12px;z-index:2147483001;background:var(--bg);color:var(--ink);border-radius:14px;box-shadow:0 10px 50px #001e4466;font:13px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif;display:none;flex-direction:column;overflow:hidden}
   #bf2 *{box-sizing:border-box}
@@ -545,6 +591,12 @@
   #bf2 .hchip{display:inline-flex;gap:5px;align-items:center;background:var(--card,#fff);border:1px solid var(--line);border-radius:8px;padding:6px 10px;font-size:13px}
   #bf2 .chip{font-size:10px;font-weight:700;text-transform:uppercase;border-radius:20px;padding:1px 7px;white-space:nowrap;color:#fff}
   #bf2 .chip.fin{background:#2f9a5a}#bf2 .chip.ini{background:#e3a21a;color:#2b1d00}#bf2 .chip.nao{background:#d2463c}
+  #bf2 .painel{display:grid;gap:4px}
+  #bf2 .pl{display:grid;grid-template-columns:minmax(150px,26%) minmax(0,1fr) 120px;gap:8px;align-items:center;font-size:12px}
+  #bf2 .pn{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}#bf2 .pn small{color:var(--muted)}
+  #bf2 .pb{display:flex;height:20px;border-radius:5px;overflow:hidden;background:var(--line)}
+  #bf2 .pb span{display:grid;place-items:center;font:700 10.5px system-ui,sans-serif;min-width:0;overflow:hidden}
+  #bf2 .pt{font:600 11px ui-monospace,Consolas,monospace;color:var(--muted);text-align:right}
   #bf2 .lst{display:grid;gap:2px;max-height:46vh;overflow:auto}
   #bf2 .lst div{display:grid;grid-template-columns:52px minmax(0,1fr) auto;gap:6px;align-items:center;padding:3px 5px;border-radius:5px}
   #bf2 .lst div.hl{background:var(--roxoSoft)}
@@ -577,16 +629,21 @@
   const $ = (s, r = document) => r.querySelector(s);
   let root;
 
+  // Giro do logo: ao abrir gira o do topo do painel (o painel cobre o botão), ao fechar gira o do botão.
+  // Se a tela se redesenhar no meio do giro, o logo continua de onde estava (--d negativo) em vez de recomeçar.
+  let GIRA = 0;
+  const girar = (el) => { if (!el) return; el.classList.remove('gira'); void el.offsetWidth; el.classList.add('gira'); };
   function montar() {
     if ($('#bf2-btn')) return;
     const st = document.createElement('style'); st.textContent = CSS; document.head.appendChild(st);
     const b = document.createElement('button'); b.id = 'bf2-btn'; b.textContent = 'Prisma';
     root = document.createElement('div'); root.id = 'bf2';
     document.body.append(b, root);
-    b.onclick = () => { root.style.display = root.style.display === 'flex' ? 'none' : 'flex'; if (root.style.display === 'flex') abrir(); };
+    b.onclick = () => { const abre = root.style.display !== 'flex'; root.style.display = abre ? 'flex' : 'none'; if (abre) { GIRA = Date.now(); abrir(); } else girar(b); };
   }
 
   async function abrir() {
+    await INICIO; // espera a cópia de segurança devolver o que o SGQ tiver apagado
     if (!configurado()) { S.aba = 'cfg'; status('Bem-vindo ao Prisma! Faça a configuração inicial (uma vez só).'); render(); return; }
     render();
     lerAviso(true).then(() => { if (root && root.style.display === 'flex') render(); });
@@ -633,14 +690,14 @@
     const nFila = FILA.reduce((n, g) => n + g.areas.length, 0);
     root.classList.toggle('dark', !!CFG.escuro);
     root.innerHTML = `
-      <div class="top"><div class="marca"><span class="ic"></span><span><b>Prisma</b><small>FVS · ${esc(CFG.obraNome)}</small></span></div>
-        <div class="tabs">${[['mapa', 'Mapa'], ['fila', `Fila (${nFila})`], ['rel', 'Relatório'], ['hist', 'Histórico'], ['colar', 'Colar roteiro'], ['gab', 'Gabaritos'], ['cfg', 'Configuração']].map(([k, t]) => `<button data-aba="${k}" class="${S.aba === k ? 'on' : ''}">${t}</button>`).join('')}</div>
+      <div class="top"><div class="marca">${(() => { const t = Date.now() - GIRA; return t < 700 ? `<span class="ic gira" style="--d:-${t}ms"></span>` : '<span class="ic"></span>'; })()}<span><b>Prisma</b><small>FVS · ${esc(CFG.obraNome)}</small></span></div>
+        <div class="tabs">${[['mapa', 'Mapa'], ['fila', `Fila (${nFila})`], ['rel', 'Relatório/Qualidade'], ['hist', 'Histórico'], ['colar', 'Colar roteiro'], ['gab', 'Gabaritos'], ['cfg', 'Configuração']].map(([k, t]) => `<button data-aba="${k}" class="${S.aba === k ? 'on' : ''}">${t}</button>`).join('')}</div>
         <button class="x" id="bf2-x">Fechar</button></div>
       ${avisoHtml()}<div class="body" id="bf2-body"></div>
       <div class="foot"><span class="msg" id="bf2-status">${esc(STATUS)}</span><span class="assin">Prisma v${VERSAO}${CANAL === 'teste' ? ' (TESTE)' : ''} · criado por João Pedro Ramos</span></div>`;
     root.querySelectorAll('[data-aba]').forEach((b) => b.onclick = () => { if (!configurado() && b.dataset.aba !== 'cfg') return status('Termine a configuração inicial primeiro.'); S.aba = b.dataset.aba; salvarTela(); render(); });
     if (!configurado()) S.aba = 'cfg';
-    $('#bf2-x').onclick = () => { root.style.display = 'none'; };
+    $('#bf2-x').onclick = () => { root.style.display = 'none'; girar($('#bf2-btn')); };
     ({ mapa: renderMapa, fila: renderFila, rel: renderRel, hist: renderHist, colar: renderColar, gab: renderGab, cfg: renderCfg })[S.aba]();
   }
 
@@ -669,6 +726,7 @@
         <button class="b full" id="m-selini"><span style="color:#c98a00">■</span> Selecionar todos os amarelos</button>
         <button class="b full" id="m-selnao"><span style="color:#d2463c">■</span> Selecionar todos os vermelhos</button>
         <button class="b full" id="m-limpa">Limpar seleção</button>
+        <button class="b full" id="m-tudo-sel">Fechar todas as FVS não finalizadas da seleção</button><div id="m-tudo-sel-out"></div>
         <div class="muted">${S.sel.length} local(is) selecionado(s). Clique ou arraste por cima dos apartamentos; clique no número do andar ou da coluna para pegar a linha inteira.</div>
         <h4>O que fazer</h4>
         <span class="seg">${[['abrir', 'Abrir'], ['fechar', 'Fechar']].map(([k, t]) => `<button data-a="${k}" class="${S.acao === k ? 'on' : ''}">${t}</button>`).join('')}</span>
@@ -702,6 +760,8 @@
     on('#m-trat', 'onchange', (e) => { S.tratativa = e.target.value; salvarTela(); });
     on('#m-ass', 'onchange', (e) => { S.assumir = e.target.checked; salvarTela(); });
     on('#m-limpa', 'onclick', () => { S.sel = []; renderMapa(); });
+    on('#m-tudo', 'onclick', () => fecharTudo([S.detalhe], 'm-tudo-out'));
+    on('#m-tudo-sel', 'onclick', () => (S.sel.length ? fecharTudo([...S.sel], 'm-tudo-sel-out') : status('Selecione os locais no mapa primeiro (clique ou arraste por cima).')));
     const selPor = (cls) => { est.todas.forEach((n) => { if (statusCel(n, S.serv) === cls && !S.sel.includes(n)) S.sel.push(n); }); renderMapa(); };
     on('#m-selini', 'onclick', () => selPor('ini'));
     on('#m-selnao', 'onclick', () => selPor('nao'));
@@ -749,7 +809,36 @@
     if (!a) return '<h4>Local</h4><div class="muted">Clique num apartamento para ver todas as FVS dele.</div>';
     const L = Object.entries(a.fvs).sort((x, y) => x[0].localeCompare(y[0], 'pt', { numeric: true }));
     const st = (e) => e[1] === 1 ? 'fin' : e[2] > 0 ? 'ini' : 'nao';
-    return `<h4>${esc(n)}</h4><div class="lst">${L.map(([c, e]) => `<div class="${c === S.serv ? 'hl' : ''}"><b>${esc(c.replace('FVS ', ''))}</b><span class="d">${esc(nomeLimpo(c))}</span><span class="chip ${st(e)}">${({ fin: 'final.', ini: 'inic.', nao: 'não inic.' })[st(e)]}${e[1] !== 1 && (e[3] || e[4]) ? ' · R/X' : ''}</span></div>`).join('')}</div>`;
+    const T = torreDe(n), semGab = (c) => !gabarito(c, T && T.nome, ehHall(n));
+    const nf = L.filter(([, e]) => e[1] !== 1);
+    return `<h4>${esc(n)}</h4><div class="lst">${L.map(([c, e]) => `<div class="${c === S.serv ? 'hl' : ''}"><b>${esc(c.replace('FVS ', ''))}</b><span class="d">${esc(nomeLimpo(c))}${e[1] !== 1 && semGab(c) ? ' · <i style="color:var(--verm)">sem gabarito</i>' : ''}</span><span class="chip ${st(e)}">${({ fin: 'final.', ini: 'inic.', nao: 'não inic.' })[st(e)]}${e[1] !== 1 && (e[3] || e[4]) ? ' · R/X' : ''}</span></div>`).join('')}</div>
+      ${nf.length ? `<button class="b p full" id="m-tudo">Fechar todas as ${nf.length} FVS não finalizadas deste local</button><div id="m-tudo-out"></div>` : '<div class="muted">Todas as FVS deste local já estão finalizadas.</div>'}`;
+  }
+  // "Fechar tudo": todas as FVS não finalizadas dos locais vão para a fila como FECHAR, cada uma com o seu gabarito,
+  // usando as datas e opções do painel "O que fazer". Se faltar gabarito de alguma, mostra quais e não manda nada sem você decidir.
+  function fecharTudo(areas, outId) {
+    const com = new Map(), sem = new Map();
+    const poe = (M, cod, n) => { if (!M.has(cod)) M.set(cod, []); M.get(cod).push(n); };
+    for (const n of areas) { const a = MAPA.areas[n]; if (!a) continue; const T = torreDe(n);
+      for (const [cod, e] of Object.entries(a.fvs)) if (e[1] !== 1) poe(gabarito(cod, T && T.nome, ehHall(n)) ? com : sem, cod, n); }
+    if (!com.size && !sem.size) return status('Nada para fechar: todas as FVS desses locais já estão finalizadas.');
+    if (S.dAbrir > S.dFechar) return status('A data de abertura está depois da de fechamento (painel "O que fazer"). Ajuste e tente de novo.');
+    const nCom = [...com.values()].reduce((s, L) => s + L.length, 0);
+    const locais = new Set([...com.values()].flat());
+    const manda = () => {
+      const txt = `Vai pôr na fila para FECHAR ${nCom} ficha(s) de ${locais.size} local(is):\n\n${[...com].map(([cod, L]) => `• ${cod} ${nomeLimpo(cod)}: ${L.length}`).join('\n')}\n\nAbre em ${fmt(S.dAbrir)} (se precisar criar a ficha) e fecha em ${fmt(S.dFechar)}.\nAprovar 2ª inspeção de R/X: ${S.segunda ? 'sim' : 'não'} · Assumir fichas da lista: ${S.assumir ? 'sim' : 'não'}\n(datas e opções do painel "O que fazer")\n\nNada é gravado agora: depois você simula e executa na aba Fila.`;
+      if (!confirm(txt)) return;
+      let i = 0;
+      for (const [cod, L] of com) FILA.push({ id: Date.now() + i++, fvs: cod, acao: 'fechar', areas: [...new Set(L)].sort((a, b) => a.localeCompare(b, 'pt', { numeric: true })), dAbrir: S.dAbrir, dFechar: S.dFechar, opc: { assumir: S.assumir, segunda: S.segunda, tratativa: S.segunda ? S.tratativa : '' } });
+      salvarFila(); status(`Na fila: fechar ${nCom} ficha(s) de ${locais.size} local(is), ${com.size} serviço(s). Simule na aba Fila antes de executar.`); render();
+    };
+    if (!sem.size) return manda();
+    const box = $('#' + outId); if (!box) return;
+    box.innerHTML = `<div class="warn" style="margin-top:6px"><b>Falta gabarito de ${sem.size} serviço(s)</b> (sem ele o Prisma não sabe o que vai NA):
+      ${[...sem].map(([cod, L]) => `<div class="row" style="justify-content:space-between;margin-top:4px"><span>${esc(cod.replace('FVS ', ''))} ${esc(nomeLimpo(cod))} · ${L.length} local(is)</span><button class="b" data-gabir="${esc(cod)}">Definir gabarito</button></div>`).join('')}
+      ${nCom ? `<button class="b p full" id="${outId}-ok" style="margin-top:8px">Mandar só as ${nCom} que já têm gabarito</button>` : '<div style="margin-top:6px">Defina os gabaritos e clique de novo.</div>'}</div>`;
+    box.querySelectorAll('[data-gabir]').forEach((b) => b.onclick = () => { S.gabCod = b.dataset.gabir; ED = null; S.aba = 'gab'; salvarTela(); render(); });
+    const ok = $('#' + outId + '-ok'); if (ok) ok.onclick = manda;
   }
   function resumoFila() {
     if (!FILA.length) return '<div class="muted">Vazia. Selecione locais e clique em "Adicionar à fila".</div>';
@@ -1014,35 +1103,77 @@
     return { ...base, sit, itens: `${totalPreenchido(ref)}/${ref.totalItens}`, inspetor, abertura: dt(ref.dataAbertura), encerramento: dt(ref.dataEncerramento), rx: (ref.totalR || 0) + (ref.totalX || 0) > 0 };
   }
   let REL = null; // { titulo, subtitulo, linhas, tipo }
+  // Pedido pronto para o Claude ler as fotos da lona do PPC (o Prisma não lê foto: quem lê é o Claude, e a lista volta para cá).
+  const PROMPT_PPC = `Você vai ler fotos da lona do PPC (programação semanal de produção) de uma obra da Realiza Construtora e transformar o que está escrito em uma lista para o Prisma, um sistema que confere as fichas de verificação de serviço (FVS).
+
+O que fazer:
+1. Leia todas as fotos que eu enviar. A lona tem, para cada serviço, a torre (ex.: 2Q, 3Q) e os apartamentos ou halls onde ele foi programado ou executado.
+2. Devolva UMA linha por serviço e por torre, sempre neste formato:
+   serviço torre locais
+   Exemplos:
+   regularização 3Q 1401, 1402, 1403
+   reboco 2Q 1701 a 1708
+   forro 3Q hall 12
+   shaft 3Q final 10
+3. Regras para os locais:
+   - Apartamento sempre com 3 ou 4 dígitos (101, 1401). Se a lona abreviar ("1401, 2 e 3"), escreva por extenso: 1401, 1402, 1403.
+   - Sequência contínua no mesmo andar pode ir como faixa: 1501 a 1508.
+   - Hall ou pavimento: "hall" + número do pavimento (hall 12).
+4. Use nomes simples de serviço: reboco, reboco externo, gesso, forro, shaft, regularização, revestimento, rejunte, bancada, balcão, louças, metais, tanque, porta de madeira, porta de alumínio, janela, contramarco, peitoril, BIT, impermeabilização, pintura, textura, corrimão, guarda-corpo, chapisco, alvenaria, fiação, hidráulica, sanitária, gás. Serviços que não têm FVS (limpeza, entulho, transporte etc.) também podem ir: o Prisma separa sozinho.
+5. Não invente nada. Se uma palavra ou número estiver ilegível, não chute: liste esses casos no final, numa seção "Não consegui ler", dizendo em qual foto e o que parece estar escrito.
+6. Responda só com a lista, dentro de um bloco de código, para eu copiar e colar direto no Prisma. A seção "Não consegui ler" vem depois do bloco, se houver.
+
+Data do PPC: [data]`;
+  // Relatório, painel e PPC leem o SGQ um de cada vez; enquanto isso o botão Parar da aba fica ativo.
+  async function lendo(fn) {
+    if (ocupado()) return;
+    LENDO = true; PARAR = false; renderRel();
+    try { await fn(); } catch (e) { status('Erro: ' + e.message); } finally { LENDO = false; PARAR = false; renderRel(); }
+  }
   function renderRel() {
-    const body = $('#bf2-body');
+    const body = $('#bf2-body'); if (!body || S.aba !== 'rel') return;
     const disp = servicosDisponiveis().sort((a, b) => a.localeCompare(b, 'pt', { numeric: true }));
     S.relServ = S.relServ || []; S.relTorre = S.relTorre || 'todas';
     const q = semAc(S.relBusca || '').trim();
     const lista = disp.filter((c) => !q || semAc(c + ' ' + nomeLimpo(c)).includes(q));
+    const trava = LENDO ? 'disabled' : '';
     body.innerHTML = `<div class="lay" style="grid-template-columns:minmax(0,1fr) minmax(0,1fr)">
       <div class="card topo"><h4>Relatório de FVS</h4>
         <div class="row"><label style="max-width:160px">Torre<select id="r-torre"><option value="todas">Todas</option>${CFG.torres.map((t) => `<option ${S.relTorre === t.nome ? 'selected' : ''}>${esc(t.nome)}</option>`).join('')}</select></label>
           <label style="max-width:220px">Mostrar<select id="r-filtro"><option value="todas">Todas as situações</option><option value="pend" ${S.relFiltro === 'pend' ? 'selected' : ''}>Só as não finalizadas</option></select></label></div>
-        <label>Serviços (${S.relServ.length} escolhido(s))<input id="r-busca" type="search" placeholder="buscar serviço…" value="${esc(S.relBusca || '')}"></label>
+        <label>Serviços (<span id="r-nserv">${S.relServ.length}</span> escolhido(s))<input id="r-busca" type="search" placeholder="buscar serviço…" value="${esc(S.relBusca || '')}"></label>
+        <div class="row"><button class="b" id="r-todos">Selecionar todos${q ? ' da busca' : ''}</button><button class="b" id="r-limpa">Limpar</button></div>
         <div style="max-height:220px;overflow:auto;border:1px solid var(--line);border-radius:8px;padding:6px;display:grid;gap:2px">${lista.map((c) => `<label class="row" style="display:flex;gap:8px;color:var(--ink)"><input type="checkbox" data-rs="${esc(c)}" ${S.relServ.includes(c) ? 'checked' : ''} style="width:auto"> <b>${esc(c.replace('FVS ', ''))}</b> ${esc(nomeLimpo(c))}</label>`).join('')}</div>
         <label class="chk"><input type="checkbox" id="r-ler" ${S.relLer !== false ? 'checked' : ''}> Ler as fichas (itens, responsável e datas; mais lento)</label>
-        <button class="b p" id="r-gerar" ${S.relServ.length ? '' : 'disabled'}>Gerar relatório</button></div>
+        <div class="row"><button class="b p" id="r-gerar" ${S.relServ.length && !LENDO ? '' : 'disabled'}>Gerar relatório</button>
+          <button class="b n" id="r-painel" ${trava}>Painel rápido de todos os serviços</button>
+          <button class="b w" id="r-stop" ${LENDO ? '' : 'disabled'}>Parar</button></div>
+        <div class="muted">O painel rápido não abre as fichas: conta pelo mapa quantas FVS de cada serviço estão sem iniciar, iniciadas e encerradas, e sai na hora.</div></div>
       <div class="card topo"><h4>Conferência do PPC</h4>
-        <div class="nota">Uma linha por serviço, do jeito que está na lona. Ex.: <b>regularização 3Q 1401, 2 e 3</b> · <b>reboco 2Q 1701 a 1708</b> · <b>forro 3Q hall 12</b>. Se tiver foto da lona, mande para o Claude, que ele devolve essas linhas prontas.</div>
+        <div class="nota">Uma linha por serviço, do jeito que está na lona. Ex.: <b>regularização 3Q 1401, 2 e 3</b> · <b>reboco 2Q 1701 a 1708</b> · <b>forro 3Q hall 12</b>.<br>Tem foto da lona? Clique em <b>Copiar pedido para o Claude</b>, cole numa conversa com o Claude, anexe as fotos e cole aqui a lista que ele devolver. Depois é só <b>Conferir no SGQ</b> e baixar a planilha (ela vem com a aba PPC).</div>
         <textarea id="r-ppc" placeholder="regularização 3Q 1401, 2 e 3&#10;shaft 3Q final 10&#10;louças 2Q 1501 a 1504">${esc(S.relPpc || '')}</textarea>
-        <div class="row"><label style="max-width:200px">Data do PPC<input type="date" id="r-dppc" value="${esc(S.relDppc || hojeStr())}"></label><button class="b p" id="r-ppc-ok">Conferir no SGQ</button></div></div>
+        <div class="row"><label style="max-width:200px">Data do PPC<input type="date" id="r-dppc" value="${esc(S.relDppc || hojeStr())}"></label><button class="b" id="r-prompt">Copiar pedido para o Claude</button><button class="b p" id="r-ppc-ok" ${trava}>Conferir no SGQ</button></div></div>
     </div>
-    <div class="card" style="margin-top:14px" id="r-out">${REL ? previewRel() : '<div class="muted">O relatório aparece aqui. Depois você baixa a planilha no modelo do Controle de FVS (Registro, Dashboard e Categorias).</div>'}</div>`;
+    <div class="card" style="margin-top:14px" id="r-out">${REL ? previewRel() : '<div class="muted">O relatório aparece aqui, com o painel por serviço. Depois você baixa a planilha no modelo do Controle de FVS (Registro, Dashboard e Categorias).</div>'}</div>`;
     $('#r-torre').onchange = (e) => { S.relTorre = e.target.value; salvarTela(); };
     $('#r-filtro').onchange = (e) => { S.relFiltro = e.target.value; salvarTela(); };
     $('#r-ler').onchange = (e) => { S.relLer = e.target.checked; salvarTela(); };
     $('#r-busca').oninput = (e) => { S.relBusca = e.target.value; renderRel(); const i = $('#r-busca'); i.focus(); i.setSelectionRange(i.value.length, i.value.length); };
-    body.querySelectorAll('[data-rs]').forEach((c) => c.onchange = () => { const v = c.dataset.rs; S.relServ = c.checked ? [...new Set([...S.relServ, v])] : S.relServ.filter((x) => x !== v); salvarTela(); renderRel(); });
+    // Marcar serviço não redesenha a aba (antes redesenhava e a lista voltava para o topo).
+    const marca = () => { $('#r-nserv').textContent = S.relServ.length; $('#r-gerar').disabled = !S.relServ.length || LENDO; body.querySelectorAll('[data-rs]').forEach((c) => { c.checked = S.relServ.includes(c.dataset.rs); }); salvarTela(); };
+    body.querySelectorAll('[data-rs]').forEach((c) => c.onchange = () => { const v = c.dataset.rs; S.relServ = c.checked ? [...new Set([...S.relServ, v])] : S.relServ.filter((x) => x !== v); marca(); });
+    $('#r-todos').onclick = () => { S.relServ = [...new Set([...S.relServ, ...lista])]; marca(); };
+    $('#r-limpa').onclick = () => { S.relServ = []; marca(); };
     $('#r-ppc').onchange = (e) => { S.relPpc = e.target.value; salvarTela(); };
     $('#r-dppc').onchange = (e) => { S.relDppc = e.target.value; salvarTela(); };
-    $('#r-gerar').onclick = () => gerarRelatorio().catch((e) => status('Erro: ' + e.message));
-    $('#r-ppc-ok').onclick = () => conferirPpc().catch((e) => status('Erro: ' + e.message));
+    $('#r-gerar').onclick = () => lendo(() => gerarRelatorio());
+    $('#r-painel').onclick = () => lendo(() => gerarRelatorio({ todos: true }));
+    $('#r-stop').onclick = () => { if (!LENDO) return; PARAR = true; status('Parando a leitura...'); };
+    $('#r-ppc-ok').onclick = () => { S.relPpc = $('#r-ppc').value; salvarTela(); lendo(() => conferirPpc()); };
+    $('#r-prompt').onclick = async () => {
+      const t = PROMPT_PPC.replace('[data]', fmt(S.relDppc || hojeStr()));
+      try { await navigator.clipboard.writeText(t); status('Pedido copiado. Abra o Claude, cole (Ctrl + V), anexe as fotos da lona e envie. Depois cole aqui a lista que ele devolver.'); } catch (e) { status('Não deu para copiar sozinho.'); }
+    };
     ligarBotoesRel();
   }
   // ------------------------------ aba HISTÓRICO ------------------------------
@@ -1089,30 +1220,38 @@
     await listarAreas(); if (!Object.keys(NOMES).length) await carregarNomes();
     for (const T of torres) if (!MAPA.ts[T.nome]) await atualizarTorre(T);
   }
-  async function gerarRelatorio() {
-    if (ocupado()) return;
+  // opc.todos = painel rápido: todos os serviços, só pelo mapa (sem abrir fichas), sem o filtro de "só não finalizadas".
+  async function gerarRelatorio(opc = {}) {
     const torres = S.relTorre === 'todas' ? CFG.torres : CFG.torres.filter((t) => t.nome === S.relTorre);
-    PARAR = false; await garantirMapa(torres);
-    const ler = S.relLer !== false, linhas = [];
+    await garantirMapa(torres);
+    if (PARAR) return status('Leitura do mapa interrompida: nada foi montado.');
+    const ler = opc.todos ? false : S.relLer !== false;
+    const servs = opc.todos ? servicosDisponiveis().sort((a, b) => a.localeCompare(b, 'pt', { numeric: true })) : S.relServ;
+    const soPend = !opc.todos && S.relFiltro === 'pend';
     const alvo = [];
-    for (const T of torres) { const est = estruturaTorre(T); const ordem = [];
-      est.ordem.forEach((n) => ordem.push(n));
-      est.outros.forEach((n) => ordem.push(n));
-      S.relServ.forEach((c) => ordem.filter((n) => MAPA.areas[n] && MAPA.areas[n].fvs[c]).sort((a, b) => a.localeCompare(b, 'pt', { numeric: true })).forEach((n) => alvo.push([n, c]))); }
-    const lista = alvo.filter(([n, c]) => !(S.relFiltro === 'pend' && MAPA.areas[n].fvs[c][1] === 1));
+    for (const T of torres) { const est = estruturaTorre(T); const ordem = est.ordem.concat(est.outros);
+      servs.forEach((c) => ordem.filter((n) => MAPA.areas[n] && MAPA.areas[n].fvs[c]).sort((a, b) => a.localeCompare(b, 'pt', { numeric: true })).forEach((n) => alvo.push([n, c]))); }
+    const lista = alvo.filter(([n, c]) => !(soPend && MAPA.areas[n].fvs[c][1] === 1));
+    if (!lista.length) return status('Nenhuma FVS desses serviços nessa torre.');
+    if (ler && lista.length > 800) { // cada ficha são ~2 consultas ao SGQ
+      const min = Math.ceil(lista.length * 2 * ((+CFG.pausaMs || 400) / 1000 + 0.3) / Math.max(1, Math.min(6, +CFG.leiturasJuntas || 3)) / 60);
+      if (!confirm(`Vai abrir ${lista.length} fichas no SGQ, o que leva uns ${min} minuto(s).\n\nDá para parar no meio pelo botão Parar.\nPara só contar por serviço, use o "Painel rápido" (não abre as fichas e sai na hora).\n\nContinuar?`)) return status('Relatório cancelado.');
+    }
     const res = []; let feitos = 0; // res[k] na mesma ordem da lista, mesmo lendo várias fichas ao mesmo tempo
     await emParalelo(lista, async ([n, c], k) => {
       res[k] = await situacaoDetalhada(n, c, ler);
-      feitos++; status(`Montando relatório: ${feitos}/${lista.length} (${localComTorre(n)} · ${c})`);
+      feitos++; if (ler || feitos % 250 === 0) status(`Montando ${opc.todos ? 'painel' : 'relatório'}: ${feitos}/${lista.length} (${localComTorre(n)} · ${c})`);
     });
-    res.forEach((x) => { if (x) linhas.push(x); });
-    REL = { tipo: 'fvs', titulo: 'Relatório de FVS', subtitulo: `${S.relServ.map((c) => c.replace('FVS ', '') + ' ' + nomeLimpo(c)).join(' · ')} · ${torres.map((t) => t.nome).join(' e ')}${S.relFiltro === 'pend' ? ' · só não finalizadas' : ''}`, linhas };
-    status(`Relatório pronto: ${linhas.length} linha(s).`); renderRel();
+    const linhas = res.filter(Boolean);
+    const parcial = linhas.length < lista.length ? `interrompido em ${linhas.length} de ${lista.length}` : '';
+    const nomeServs = opc.todos ? servs.length + ' serviços, contados pelo mapa' : servs.length > 6 ? servs.length + ' serviços' : servs.map((c) => c.replace('FVS ', '') + ' ' + nomeLimpo(c)).join(' · ');
+    REL = { tipo: 'fvs', titulo: opc.todos ? 'Painel de todos os serviços' : 'Relatório de FVS', subtitulo: `${nomeServs} · ${torres.map((t) => t.nome).join(' e ')}${soPend ? ' · só não finalizadas' : ''}${parcial ? ' · ' + parcial : ''}`, linhas };
+    status(parcial ? `Parado: ${linhas.length} de ${lista.length} linha(s) montadas. Dá para baixar a planilha só com elas.` : `${REL.titulo} pronto: ${linhas.length} linha(s).`);
   }
   async function conferirPpc() {
-    if (ocupado()) return;
-    PARAR = false; await garantirMapa(CFG.torres);
-    const linhas = [], naoEntendi = [];
+    await garantirMapa(CFG.torres);
+    if (PARAR) return status('Leitura do mapa interrompida: nada foi conferido.');
+    const naoEntendi = [];
     const L = (S.relPpc || '').split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
     const lista = [];
     for (const l of L) {
@@ -1126,20 +1265,43 @@
       const s = await situacaoDetalhada(n, cod, true); s.origem = l; res[k] = s;
       feitos++; status(`Conferindo ${feitos}/${lista.length}: ${localComTorre(n)} · ${cod}`);
     });
-    res.forEach((x) => { if (x) linhas.push(x); });
-    REL = { tipo: 'ppc', titulo: 'Conferência de FVS do PPC', subtitulo: `PPC de ${fmt(S.relDppc || hojeStr())} · ${L.length} linha(s) da lona`, linhas, naoEntendi };
-    status(`Conferência pronta: ${linhas.length} ficha(s) conferida(s).`); renderRel();
+    const linhas = res.filter(Boolean);
+    const parcial = linhas.length < lista.length ? `interrompido em ${linhas.length} de ${lista.length}` : '';
+    REL = { tipo: 'ppc', titulo: 'Conferência de FVS do PPC', subtitulo: `PPC de ${fmt(S.relDppc || hojeStr())} · ${L.length} linha(s) da lona${parcial ? ' · ' + parcial : ''}`, linhas, naoEntendi };
+    status(parcial ? `Parado: ${linhas.length} de ${lista.length} ficha(s) conferidas.` : `Conferência pronta: ${linhas.length} ficha(s) conferida(s).`);
   }
   const abertaTxt = (s) => ['ini', 'enc', 'fin'].includes(s) ? 'Sim' : s === 'none' ? '—' : 'Não';
   function contarSit(L) { const c = {}; L.forEach((x) => { c[x.sit] = (c[x.sit] || 0) + 1; }); return c; }
+  // Painel por serviço, como o Dashboard da planilha da qualidade: sem iniciar / iniciadas / encerradas (encerrada = verificação encerrada ou FVS finalizada).
+  function painelDados(L) {
+    const G = new Map();
+    L.forEach((x) => { const st = STATUS_PL[x.sit]; if (!st) return; const k = categoria(x.cod);
+      const g = G.get(k) || { cat: k, cods: new Set(), sem: 0, ini: 0, enc: 0 }; g.cods.add(x.cod.replace('FVS ', ''));
+      g[st === 'ENCERRADA' ? 'enc' : st === 'INICIADA' ? 'ini' : 'sem']++; G.set(k, g); });
+    return [...G.values()];
+  }
+  function painelHtml(L) {
+    const D = painelDados(L); if (!D.length) return '';
+    const max = Math.max(...D.map((g) => g.sem + g.ini + g.enc));
+    const tot = D.reduce((t, g) => ({ sem: t.sem + g.sem, ini: t.ini + g.ini, enc: t.enc + g.enc }), { sem: 0, ini: 0, enc: 0 });
+    const seg = (n, cor, tx) => (n ? `<span style="flex:${n};background:${cor};color:${tx}" title="${n}">${n}</span>` : '');
+    return `<div class="card topo" style="margin:10px 0"><div class="row" style="justify-content:space-between"><h4>Painel por serviço</h4>
+        <div class="row">${[['Sem iniciar', tot.sem, '#d2463c'], ['Iniciadas', tot.ini, '#e3a21a'], ['Encerradas', tot.enc, '#2f9a5a']].map(([t, n, c]) => `<span class="hchip" style="border-left:4px solid ${c}"><b>${n}</b> ${t}</span>`).join('')}</div></div>
+      <div class="painel"><div class="pl muted"><span>Serviço</span><span></span><span class="pt">sem · ini · enc</span></div>
+      ${D.map((g) => { const t = g.sem + g.ini + g.enc; const cods = [...g.cods].join(', ');
+        return `<div class="pl"><span class="pn" title="FVS ${esc(cods)}"><b>${esc(g.cat)}</b> <small>${esc(cods)}</small></span><span class="pb" style="width:${Math.max(6, (t / max) * 100)}%">${seg(g.sem, '#d2463c', '#fff')}${seg(g.ini, '#e3a21a', '#2b1d00')}${seg(g.enc, '#2f9a5a', '#fff')}</span><span class="pt">${g.sem} · ${g.ini} · ${g.enc}</span></div>`; }).join('')}</div></div>`;
+  }
+  const MAX_PREVIA = 300; // tabela na tela; a planilha e o "Copiar" levam todas as linhas
   function previewRel() {
     const c = contarSit(REL.linhas);
     return `<div class="row" style="justify-content:space-between"><div><h4>${esc(REL.titulo)}</h4><div class="muted">${esc(REL.subtitulo)}</div></div>
-      <div class="row"><button class="b p" id="r-xlsx">Baixar planilha (modelo Controle de FVS)</button><button class="b" id="r-copy">Copiar para Excel</button></div></div>
+      <div class="row"><button class="b p" id="r-xlsx">Baixar planilha (modelo Controle de FVS)</button><button class="b" id="r-copy">Copiar para Excel</button><button class="b" id="r-copy-painel">Copiar painel</button></div></div>
+      ${painelHtml(REL.linhas)}
       <div class="muted">${Object.entries(c).map(([k, n]) => `${n} ${SIT[k].toLowerCase()}`).join(' · ')}</div>
       ${REL.naoEntendi && REL.naoEntendi.length ? `<div class="warn">${REL.naoEntendi.map(esc).join('<br>')}</div>` : ''}
+      ${REL.linhas.length > MAX_PREVIA ? `<div class="muted">Mostrando ${MAX_PREVIA} de ${REL.linhas.length} linhas. A planilha e o "Copiar para Excel" levam todas.</div>` : ''}
       <table><tr>${REL.tipo === 'ppc' ? '<th>Linha da lona</th>' : ''}<th>Torre</th><th>Local</th><th>FVS</th><th>Situação</th>${REL.tipo === 'ppc' ? '<th>Aberta?</th>' : ''}<th>Itens</th><th>Responsável</th><th>Abertura</th><th>Encerramento</th></tr>
-      ${REL.linhas.map((x) => `<tr class="${x.sit === 'fin' ? 'ok' : ['sem', 'vni'].includes(x.sit) ? 'pend' : ''}">${REL.tipo === 'ppc' ? `<td>${esc(x.origem)}</td>` : ''}<td>${esc(x.torre)}</td><td>${esc(localCurto(x.area))}</td><td>${esc(x.cod.replace('FVS ', ''))} ${esc(nomeLimpo(x.cod))}</td><td>${esc(SIT[x.sit])}${x.rx ? ' · R/X' : ''}</td>${REL.tipo === 'ppc' ? `<td><b>${abertaTxt(x.sit)}</b></td>` : ''}<td>${esc(x.itens)}</td><td>${esc(x.inspetor)}</td><td>${esc(x.abertura)}</td><td>${esc(x.encerramento)}</td></tr>`).join('')}</table>`;
+      ${REL.linhas.slice(0, MAX_PREVIA).map((x) => `<tr class="${x.sit === 'fin' ? 'ok' : ['sem', 'vni'].includes(x.sit) ? 'pend' : ''}">${REL.tipo === 'ppc' ? `<td>${esc(x.origem)}</td>` : ''}<td>${esc(x.torre)}</td><td>${esc(localCurto(x.area))}</td><td>${esc(x.cod.replace('FVS ', ''))} ${esc(nomeLimpo(x.cod))}</td><td>${esc(SIT[x.sit])}${x.rx ? ' · R/X' : ''}</td>${REL.tipo === 'ppc' ? `<td><b>${abertaTxt(x.sit)}</b></td>` : ''}<td>${esc(x.itens)}</td><td>${esc(x.inspetor)}</td><td>${esc(x.abertura)}</td><td>${esc(x.encerramento)}</td></tr>`).join('')}</table>`;
   }
   function ligarBotoesRel() {
     const p = $('#r-xlsx'); if (p) p.onclick = () => { try { baixarPlanilha(); } catch (e) { status('Erro ao montar a planilha: ' + e.message); } };
@@ -1147,6 +1309,10 @@
       const tsv = [['Torre', 'Local', 'FVS', 'Serviço', 'Situação', REL.tipo === 'ppc' ? 'Aberta?' : null, 'Itens', 'Responsável', 'Abertura', 'Encerramento'].filter((x) => x !== null).join('\t')]
         .concat(REL.linhas.map((x) => [x.torre, localCurto(x.area), x.cod, nomeLimpo(x.cod), SIT[x.sit] + (x.rx ? ' · R/X' : ''), REL.tipo === 'ppc' ? abertaTxt(x.sit) : null, x.itens, x.inspetor, x.abertura, x.encerramento].filter((v) => v !== null).join('\t'))).join('\n');
       navigator.clipboard.writeText(tsv).then(() => status('Copiado. Cole no Excel ou no Google Planilhas.'), () => status('Não deu para copiar.'));
+    };
+    const cp = $('#r-copy-painel'); if (cp) cp.onclick = () => {
+      const tsv = ['Serviço\tFVS\tSem iniciar\tIniciadas\tEncerradas\tTotal'].concat(painelDados(REL.linhas).map((g) => [g.cat, [...g.cods].join(', '), g.sem, g.ini, g.enc, g.sem + g.ini + g.enc].join('\t'))).join('\n');
+      navigator.clipboard.writeText(tsv).then(() => status('Painel copiado. Cole no Excel com Ctrl + V.'), () => status('Não deu para copiar.'));
     };
   }
   // ------------------------------ PLANILHA (modelo CONTROLE DE FVS) ------------------------------
@@ -1231,8 +1397,33 @@
 <dxfs count="3"><dxf><fill><patternFill><bgColor rgb="FF92D050"/></patternFill></fill></dxf><dxf><fill><patternFill><bgColor rgb="FFFFFF00"/></patternFill></fill></dxf><dxf><fill><patternFill><bgColor rgb="FFFF0000"/></patternFill></fill></dxf></dxfs>
 </styleSheet>`;
 
-  function planilhaXlsx(linhasRel) {
-    const L = linhasRel.map(linhaPlanilha);
+  // 1401, 1402, 1403, 1405 -> "1401 a 1403, 1405"
+  function intervalos(nums) {
+    const v = [...new Set(nums)].sort((a, b) => a - b), out = [];
+    for (let i = 0; i < v.length; i++) { let j = i; while (j + 1 < v.length && v[j + 1] === v[j] + 1) j++; out.push(j - i >= 2 ? `${v[i]} a ${v[j]}` : v.slice(i, j + 1).join(', ')); i = j; }
+    return out.join(', ');
+  }
+  // Aba PPC: uma linha por linha da lona (e torre/FVS), com os apartamentos e quantos estão encerrados, iniciados e sem iniciar.
+  function linhasPpc(R) {
+    const G = new Map();
+    R.linhas.forEach((x) => { const k = [x.origem, x.torre, x.cod].join('|'); const g = G.get(k) || { origem: x.origem, torre: x.torre, cod: x.cod, L: [] }; g.L.push(x); G.set(k, g); });
+    const rot = (x) => { const p = lerArea(x.area); return p.tipo === 'un' ? p.num : p.tipo === 'hall' ? 'hall ' + p.pav : localCurto(x.area); };
+    const junta = (L) => { const r = L.map(rot); return [intervalos(r.filter((v) => typeof v === 'number')), ...r.filter((v) => typeof v !== 'number')].filter(Boolean).join(', '); };
+    return [...G.values()].map((g) => {
+      const por = (st) => g.L.filter((x) => (st ? STATUS_PL[x.sit] === st : x.sit === 'none'));
+      const det = [['Encerradas', por('ENCERRADA')], ['Iniciadas', por('INICIADA')], ['Sem iniciar', por('SEM INICIAR')], ['Sem essa FVS no local', por('')]].filter(([, L]) => L.length).map(([t, L]) => `${t}: ${junta(L)}`).join(' · ');
+      return [g.origem, g.torre, categoria(g.cod), g.cod, junta(g.L), por('ENCERRADA').length, por('INICIADA').length, por('SEM INICIAR').length, det];
+    });
+  }
+  // Gráfico de barras empilhadas do Dashboard (sem iniciar / iniciada / encerradas por serviço), lendo a tabela A11:D.
+  function graficoXml(ultima) {
+    const ser = [['B', 'FF0000'], ['C', 'FFC000'], ['D', '92D050']].map(([c, cor], i) => `<c:ser><c:idx val="${i}"/><c:order val="${i}"/><c:tx><c:strRef><c:f>Dashboard!$${c}$11</c:f></c:strRef></c:tx><c:spPr><a:solidFill><a:srgbClr val="${cor}"/></a:solidFill></c:spPr><c:invertIfNegative val="0"/><c:cat><c:strRef><c:f>Dashboard!$A$12:$A$${ultima}</c:f></c:strRef></c:cat><c:val><c:numRef><c:f>Dashboard!$${c}$12:$${c}$${ultima}</c:f></c:numRef></c:val></c:ser>`).join('');
+    return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><c:roundedCorners val="0"/><c:chart><c:title><c:tx><c:rich><a:bodyPr/><a:p><a:r><a:t>FVS por serviço</a:t></a:r></a:p></c:rich></c:tx><c:overlay val="0"/></c:title><c:autoTitleDeleted val="0"/><c:plotArea><c:layout/><c:barChart><c:barDir val="bar"/><c:grouping val="stacked"/><c:varyColors val="0"/>${ser}<c:gapWidth val="40"/><c:overlap val="100"/><c:axId val="5101"/><c:axId val="5102"/></c:barChart><c:catAx><c:axId val="5101"/><c:scaling><c:orientation val="maxMin"/></c:scaling><c:delete val="0"/><c:axPos val="l"/><c:numFmt formatCode="General" sourceLinked="0"/><c:tickLblPos val="nextTo"/><c:crossAx val="5102"/><c:crosses val="autoZero"/><c:auto val="1"/><c:lblAlgn val="ctr"/><c:lblOffset val="100"/><c:noMultiLvlLbl val="0"/></c:catAx><c:valAx><c:axId val="5102"/><c:scaling><c:orientation val="minMax"/></c:scaling><c:delete val="0"/><c:axPos val="b"/><c:majorGridlines/><c:numFmt formatCode="General" sourceLinked="1"/><c:tickLblPos val="nextTo"/><c:crossAx val="5101"/><c:crosses val="max"/><c:crossBetween val="between"/></c:valAx></c:plotArea><c:legend><c:legendPos val="b"/><c:overlay val="0"/></c:legend><c:plotVisOnly val="1"/><c:dispBlanksAs val="gap"/></c:chart></c:chartSpace>`;
+  }
+
+  function planilhaXlsx(R) {
+    const L = R.linhas.map(linhaPlanilha);
+    const ppc = R.tipo === 'ppc';
     const CAB = ['BLOCO', 'Pavimento', 'Apartamento', 'Categoria de Serviço', 'Responsável', 'Status', 'Observações'];
     const n = L.length + 1; // última linha com dados
     // Registro de FVS
@@ -1246,15 +1437,16 @@
       .map(([c, src, arr]) => `<dataValidation type="list" allowBlank="1" showErrorMessage="1" sqref="${c}2:${c}${n + 500}"><formula1>${xe(lista(src, arr))}</formula1></dataValidation>`).join('');
     const cf = [['SEM INICIAR', 2, 1], ['INICIADA', 1, 2], ['ENCERRADA', 0, 3]].map(([t, dxf, pr]) =>
       `<cfRule type="containsText" dxfId="${dxf}" priority="${pr}" operator="containsText" text="${t}"><formula>NOT(ISERROR(SEARCH("${t}",F2)))</formula></cfRule>`).join('');
-    const sheet1 = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet ${NS}><dimension ref="A1:G${n}"/>
-<sheetViews><sheetView tabSelected="1" zoomScale="80" workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews><sheetFormatPr defaultRowHeight="14.4"/>
+    const sheetReg = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet ${NS}><dimension ref="A1:G${n}"/>
+<sheetViews><sheetView ${ppc ? '' : 'tabSelected="1" '}zoomScale="80" workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews><sheetFormatPr defaultRowHeight="14.4"/>
 <cols><col min="1" max="1" width="13.2" customWidth="1"/><col min="2" max="2" width="13.3" customWidth="1"/><col min="3" max="3" width="13.4" customWidth="1"/><col min="4" max="4" width="24" customWidth="1"/><col min="5" max="6" width="22" customWidth="1"/><col min="7" max="7" width="70" customWidth="1"/></cols>
 <sheetData>${reg.join('')}</sheetData><autoFilter ref="A1:G${n}"/><conditionalFormatting sqref="F2:F${n + 500}">${cf}</conditionalFormatting><dataValidations count="5">${dv}</dataValidations>
 <pageMargins left="0.5" right="0.5" top="0.75" bottom="0.75" header="0.3" footer="0.3"/><pageSetup paperSize="9" orientation="landscape"/></worksheet>`;
-    // Dashboard (fórmulas iguais às do modelo, já com o valor calculado)
+    // Dashboard (fórmulas iguais às do modelo, já com o valor calculado) + gráfico por serviço
     const conta = (filtro) => L.filter(filtro).length;
     const tem = (s, t) => String(s).includes(t);
     const RG = "'Registro de FVS'";
+    const ultima = 11 + cats.length;
     const dRows = [
       `<row r="1" ht="21" customHeight="1">${cel('A1', 'Controle de FVS - Obra: ' + (CFG.obraNome || ''), 4)}</row>`,
       `<row r="3">${cel('A3', 'Gerado pelo Prisma em ' + new Date().toLocaleString('pt-BR') + ' a partir do SGQ', 0)}</row>`,
@@ -1265,33 +1457,57 @@
       ...cats.map((c, k) => { const r = 12 + k; const q = (t) => ({ f: `COUNTIFS(${RG}!D:D,A${r},${RG}!F:F,"*${t}*")`, v: conta((x) => x[3] === c && tem(x[5], t)) });
         return `<row r="${r}">${cel('A' + r, c, 11)}${cel('B' + r, q('SEM INICIAR'), 2)}${cel('C' + r, q('INICIADA'), 2)}${cel('D' + r, q('ENCERRADA'), 2)}</row>`; }),
     ];
-    const sheet2 = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet ${NS}><sheetViews><sheetView workbookViewId="0"/></sheetViews><sheetFormatPr defaultRowHeight="14.4"/>
+    const comGrafico = cats.length > 0;
+    const sheetDash = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet ${NS}><sheetViews><sheetView workbookViewId="0"/></sheetViews><sheetFormatPr defaultRowHeight="14.4"/>
 <cols><col min="1" max="1" width="31" customWidth="1"/><col min="2" max="2" width="12" customWidth="1"/><col min="3" max="3" width="15" customWidth="1"/><col min="4" max="4" width="13" customWidth="1"/></cols>
 <sheetData>${dRows.join('')}</sheetData><mergeCells count="5"><mergeCell ref="A1:O2"/><mergeCell ref="A5:D5"/><mergeCell ref="B6:D6"/><mergeCell ref="B7:D7"/><mergeCell ref="B8:D8"/></mergeCells>
-<pageMargins left="0.75" right="0.75" top="1" bottom="1" header="0.5" footer="0.5"/></worksheet>`;
+<pageMargins left="0.75" right="0.75" top="1" bottom="1" header="0.5" footer="0.5"/>${comGrafico ? '<drawing r:id="rId1"/>' : ''}</worksheet>`;
+    const desenho = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><xdr:twoCellAnchor><xdr:from><xdr:col>5</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>3</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:to><xdr:col>16</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>${Math.max(24, ultima + 3)}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to><xdr:graphicFrame macro=""><xdr:nvGraphicFramePr><xdr:cNvPr id="2" name="FVS por serviço"/><xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr><xdr:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/></xdr:xfrm><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="rId1"/></a:graphicData></a:graphic></xdr:graphicFrame><xdr:clientData/></xdr:twoCellAnchor></xdr:wsDr>`;
     // Categorias de Serviços (listas das caixinhas de escolha)
     const colsCat = [['A', 'Categoria de Serviço', cats], ['C', 'Responsável', resp], ['E', 'Status', stats], ['G', 'Pavimento', pavs], ['I', 'BLOCO', blocos]];
     const maxN = Math.max(...colsCat.map((c) => c[2].length));
     const cRows = [];
     for (let r = 1; r <= maxN + 1; r++) cRows.push(`<row r="${r}">${colsCat.map(([c, t, arr]) => (r === 1 ? cel(c + r, t, 1) : arr[r - 2] != null ? cel(c + r, arr[r - 2], 11) : '')).join('')}</row>`);
-    const sheet3 = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet ${NS}><sheetViews><sheetView workbookViewId="0"/></sheetViews><sheetFormatPr defaultRowHeight="14.4"/>
+    const sheetCat = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet ${NS}><sheetViews><sheetView workbookViewId="0"/></sheetViews><sheetFormatPr defaultRowHeight="14.4"/>
 <cols><col min="1" max="1" width="34" customWidth="1"/><col min="3" max="3" width="23" customWidth="1"/><col min="5" max="5" width="18" customWidth="1"/><col min="7" max="7" width="20" customWidth="1"/><col min="9" max="9" width="20" customWidth="1"/></cols>
 <sheetData>${cRows.join('')}</sheetData><pageMargins left="0.75" right="0.75" top="1" bottom="1" header="0.5" footer="0.5"/></worksheet>`;
-    const R = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
-    return zipStore([
-      ['[Content_Types].xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>${[1, 2, 3].map((i) => `<Override PartName="/xl/worksheets/sheet${i}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`).join('')}<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>`],
-      ['_rels/.rels', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${R}/officeDocument" Target="xl/workbook.xml"/></Relationships>`],
-      ['xl/workbook.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook ${NS}><bookViews><workbookView/></bookViews><sheets><sheet name="Registro de FVS" sheetId="1" r:id="rId1"/><sheet name="Dashboard" sheetId="2" r:id="rId2"/><sheet name="Categorias de Serviços" sheetId="3" r:id="rId3"/></sheets><definedNames><definedName name="_xlnm._FilterDatabase" localSheetId="0" hidden="1">'Registro de FVS'!$A$1:$G$${n}</definedName></definedNames><calcPr calcId="191029" fullCalcOnLoad="1"/></workbook>`],
-      ['xl/_rels/workbook.xml.rels', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${[1, 2, 3].map((i) => `<Relationship Id="rId${i}" Type="${R}/worksheet" Target="worksheets/sheet${i}.xml"/>`).join('')}<Relationship Id="rId4" Type="${R}/styles" Target="styles.xml"/></Relationships>`],
+    // PPC (só na conferência do PPC): primeira aba
+    const abas = [];
+    if (ppc) {
+      const P = linhasPpc(R);
+      const CABP = ['Linha da lona', 'Torre', 'Frente de serviço', 'FVS', 'Apartamentos', 'Encerradas', 'Iniciadas', 'Sem iniciar', 'Situação por apartamento'];
+      const estCab = [1, 1, 1, 1, 1, 10, 9, 8, 1], estCel = [3, 2, 2, 2, 3, 2, 2, 2, 3];
+      const rows = [`<row r="1">${CABP.map((t, i) => cel(colL(i) + 1, t, estCab[i])).join('')}</row>`]
+        .concat(P.map((r, k) => `<row r="${k + 2}">${r.map((v, i) => cel(colL(i) + (k + 2), v, estCel[i])).join('')}</row>`));
+      (R.naoEntendi || []).forEach((t, k) => rows.push(`<row r="${P.length + 3 + k}">${cel('A' + (P.length + 3 + k), 'Não entrou: ' + t, 0)}</row>`));
+      abas.push({ nome: 'PPC', xml: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet ${NS}><sheetViews><sheetView tabSelected="1" zoomScale="90" workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews><sheetFormatPr defaultRowHeight="14.4"/>
+<cols><col min="1" max="1" width="34" customWidth="1"/><col min="2" max="2" width="8" customWidth="1"/><col min="3" max="3" width="22" customWidth="1"/><col min="4" max="4" width="12" customWidth="1"/><col min="5" max="5" width="30" customWidth="1"/><col min="6" max="8" width="12" customWidth="1"/><col min="9" max="9" width="80" customWidth="1"/></cols>
+<sheetData>${rows.join('')}</sheetData><autoFilter ref="A1:I${P.length + 1}"/><pageMargins left="0.5" right="0.5" top="0.75" bottom="0.75" header="0.3" footer="0.3"/><pageSetup paperSize="9" orientation="landscape"/></worksheet>` });
+    }
+    abas.push({ nome: 'Registro de FVS', xml: sheetReg }, { nome: 'Dashboard', xml: sheetDash, grafico: comGrafico }, { nome: 'Categorias de Serviços', xml: sheetCat });
+    const iReg = abas.findIndex((a) => a.nome === 'Registro de FVS'), iDash = abas.findIndex((a) => a.grafico);
+    const REL_NS = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+    const PKG = 'http://schemas.openxmlformats.org/package/2006/relationships';
+    const arqs = [
+      ['[Content_Types].xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>${abas.map((a, i) => `<Override PartName="/xl/worksheets/sheet${i + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`).join('')}<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>${iDash >= 0 ? '<Override PartName="/xl/drawings/drawing1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/><Override PartName="/xl/charts/chart1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/>' : ''}</Types>`],
+      ['_rels/.rels', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="${PKG}"><Relationship Id="rId1" Type="${REL_NS}/officeDocument" Target="xl/workbook.xml"/></Relationships>`],
+      ['xl/workbook.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook ${NS}><bookViews><workbookView/></bookViews><sheets>${abas.map((a, i) => `<sheet name="${xe(a.nome)}" sheetId="${i + 1}" r:id="rId${i + 1}"/>`).join('')}</sheets><definedNames><definedName name="_xlnm._FilterDatabase" localSheetId="${iReg}" hidden="1">'Registro de FVS'!$A$1:$G$${n}</definedName></definedNames><calcPr calcId="191029" fullCalcOnLoad="1"/></workbook>`],
+      ['xl/_rels/workbook.xml.rels', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="${PKG}">${abas.map((a, i) => `<Relationship Id="rId${i + 1}" Type="${REL_NS}/worksheet" Target="worksheets/sheet${i + 1}.xml"/>`).join('')}<Relationship Id="rId${abas.length + 1}" Type="${REL_NS}/styles" Target="styles.xml"/></Relationships>`],
       ['xl/styles.xml', ESTILOS],
-      ['xl/worksheets/sheet1.xml', sheet1], ['xl/worksheets/sheet2.xml', sheet2], ['xl/worksheets/sheet3.xml', sheet3],
-    ]);
+      ...abas.map((a, i) => [`xl/worksheets/sheet${i + 1}.xml`, a.xml]),
+    ];
+    if (iDash >= 0) arqs.push(
+      [`xl/worksheets/_rels/sheet${iDash + 1}.xml.rels`, `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="${PKG}"><Relationship Id="rId1" Type="${REL_NS}/drawing" Target="../drawings/drawing1.xml"/></Relationships>`],
+      ['xl/drawings/drawing1.xml', desenho],
+      ['xl/drawings/_rels/drawing1.xml.rels', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="${PKG}"><Relationship Id="rId1" Type="${REL_NS}/chart" Target="../charts/chart1.xml"/></Relationships>`],
+      ['xl/charts/chart1.xml', graficoXml(ultima)]);
+    return zipStore(arqs);
   }
   function baixarPlanilha() {
     if (!REL || !REL.linhas.length) return status('Gere o relatório primeiro.');
     const d = new Date(), dia = `${String(d.getDate()).padStart(2, '0')}.${String(d.getMonth() + 1).padStart(2, '0')}`;
     const nome = `CONTROLE DE FVS - ${(CFG.obraNome || 'obra').replace(/[\\/:*?"<>|]/g, ' ').trim()} - ${dia}${REL.tipo === 'ppc' ? ' - PPC' : ''}.xlsx`;
-    const a = document.createElement('a'); a.href = URL.createObjectURL(planilhaXlsx(REL.linhas)); a.download = nome;
+    const a = document.createElement('a'); a.href = URL.createObjectURL(planilhaXlsx(REL)); a.download = nome;
     document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 2000);
     status(`Planilha baixada: ${nome} (${REL.linhas.length} linha(s)).`);
   }
@@ -1488,7 +1704,9 @@
       <label>Inspecionado por (você)<input id="q-k-insp" type="search" placeholder="filtrar: joão pedro…" value="${esc(S['cfgQk-insp'] || '')}">${sel('k-insp', S.cfgInsp || CFG.idInspecionado)}</label>
       <label>Aprovado por<input id="q-k-apr" type="search" placeholder="filtrar: jhonatan…" value="${esc(S['cfgQk-apr'] || '')}">${sel('k-apr', S.cfgApr || CFG.idAprovado)}</label>` : ''}
       ${funcs.length ? `<div class="row"><button class="b" id="k-func">Atualizar lista de funcionários</button></div>` : (obraAtualId ? `<div class="warn">Buscando a lista de funcionários da obra... <button class="b" id="k-func">Buscar de novo</button></div>` : '<div class="muted">Escolha a obra para aparecer a lista de funcionários.</div>')}
-      <label>Assumir fichas de (um nome por linha: ex-funcionários ou colegas que autorizaram; o Prisma só assume quando você marca a opção no Mapa)<textarea id="k-ex" style="min-height:70px">${esc(CFG.exFuncionarios.join('\n'))}</textarea></label>
+      <label>Assumir fichas de (um nome por linha: ex-funcionários ou colegas que autorizaram; o Prisma só assume quando você marca a opção no Mapa). <b>Salva sozinho enquanto você digita.</b><textarea id="k-ex" style="min-height:70px">${esc(CFG.exFuncionarios.join('\n'))}</textarea></label>
+      ${funcs.length ? `<div class="row"><input id="k-ex-add" list="k-ex-dl" placeholder="ou digite parte do nome e escolha da lista…" style="max-width:380px"><datalist id="k-ex-dl">${funcs.map((f) => `<option value="${esc(f.nome)}">`).join('')}</datalist><button class="b" id="k-ex-ok">Adicionar à lista</button></div>` : ''}
+      <div id="k-ex-conf" class="muted">${conferirEx(CFG.exFuncionarios, funcs)}</div>
       <label>Tratativa padrão (usada na 2ª inspeção quando você não escreve uma)<input id="k-trat" value="${esc(CFG.tratativaPadrao)}"></label>
       <details><summary>Avançado</summary><label style="margin-top:8px;max-width:240px">Pausa entre consultas ao SGQ (ms)<input id="k-pausa" type="number" min="200" value="${esc(CFG.pausaMs)}"></label>
         <label style="margin-top:8px;max-width:340px">Consultas ao mesmo tempo ao ler mapa e relatórios (1 a 6; gravar é sempre uma por vez)<input id="k-par" type="number" min="1" max="6" value="${esc(CFG.leiturasJuntas || 3)}"></label></details>
@@ -1509,6 +1727,16 @@
     if (bf) bf.onclick = async () => { const ob = OBRAS.find((o) => +o.id === obraAtualId) || { id: obraAtualId }; bf.disabled = true; try { const L = await carregarFuncionarios(ob); status(L.length ? L.length + ' funcionário(s) encontrado(s).' : 'Não encontrei nomes nas fichas dessa obra.'); S.funcTentou = obraAtualId; } catch (e) { status('Erro: ' + e.message); } renderCfg(); };
     if (!funcs.length && obraAtualId && S.funcTentou !== obraAtualId && token()) { S.funcTentou = obraAtualId; setTimeout(() => { const b = $('#k-func'); if (b) b.click(); }, 60); }
     $('#k-escuro').onchange = (e) => { CFG.escuro = e.target.checked; LS.set('cfg', Object.assign({}, LS.get('cfg', {}), { escuro: CFG.escuro })); render(); };
+    // "Assumir fichas de" e a tratativa salvam na hora: antes, colar um nome e sair (ou a tela se redesenhar) perdia o que não tinha sido salvo.
+    const salvaCampo = (k, v) => { CFG[k] = v; LS.set('cfg', Object.assign({}, LS.get('cfg', {}), { [k]: v })); };
+    const lerEx = (t) => [...new Set(String(t).split(/\r?\n/).map((x) => x.replace(/\s+/g, ' ').trim()).filter(Boolean))];
+    let tEx = null;
+    const salvaEx = () => { salvaCampo('exFuncionarios', lerEx($('#k-ex').value)); clearTimeout(tEx); tEx = setTimeout(() => { const c = $('#k-ex-conf'); if (c) c.innerHTML = conferirEx(CFG.exFuncionarios, funcs); status('Lista "Assumir fichas de" salva (' + CFG.exFuncionarios.length + ' nome(s)).'); }, 400); };
+    $('#k-ex').oninput = salvaEx;
+    const exAdd = () => { const i = $('#k-ex-add'); const v = (i && i.value || '').trim(); if (!v) return; const ta = $('#k-ex'); ta.value = lerEx(ta.value + '\n' + v).join('\n'); i.value = ''; salvaEx(); };
+    const bxa = $('#k-ex-ok'); if (bxa) bxa.onclick = exAdd;
+    const ixa = $('#k-ex-add'); if (ixa) ixa.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); exAdd(); } };
+    $('#k-trat').onchange = (e) => { salvaCampo('tratativaPadrao', e.target.value.trim() || PADRAO.tratativaPadrao); status('Tratativa padrão salva.'); };
     if (!configurado() && !OBRAS.length && token()) setTimeout(() => { const b = $('#k-det'); if (b) b.click(); }, 50);
     $('#k-det').onclick = async () => {
       $('#k-obras').textContent = 'Buscando...';
@@ -1553,6 +1781,19 @@
     };
     $('#k-reset').onclick = () => { if (confirm('Voltar a configuração ao padrão do script?')) { LS.set('cfg', {}); CFG = Object.assign({}, PADRAO); render(); } };
   }
+
+  // Ao carregar a página: se o SGQ apagou os dados do Prisma (logout), volta tudo da cópia e relê o estado.
+  function recarregarEstado() {
+    CFG = Object.assign({}, PADRAO, LS.get('cfg', {})); zerarLeitura(); AREAS = null;
+    NOMES = LS.get(K('nomes'), {}); MAPA = LS.get(K('mapa'), { ts: {}, areas: {} }); GAB_USER = LS.get(K('gab'), {});
+    FILA = LS.get(K('fila'), []); HIST = LS.get(K('hist'), []); PLANOS = LS.get(K('planos'), {}); RESULT = LS.get(K('result'), []);
+    Object.assign(S, LS.get(K('tela'), {})); if (!CFG.torres.find((t) => t.nome === S.torre)) S.torre = (CFG.torres[0] || {}).nome || '';
+  }
+  const INICIO = sincronizarCopia().then((n) => { if (n) { recarregarEstado(); status(`O SGQ tinha apagado os dados do Prisma ao sair; recuperei ${n} item(ns) da cópia de segurança.`); } return n; });
+  // Com a página aberta, o SGQ pode apagar de novo (sessão caiu): confere de tempos em tempos e quando a aba volta a ficar visível.
+  const vigiar = () => { if (!LENDO && !RODANDO) sincronizarCopia().then((n) => { if (n) status(`O SGQ apagou os dados do Prisma; recuperei ${n} item(ns) da cópia de segurança.`); }); };
+  setInterval(vigiar, 15000);
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') vigiar(); });
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', montar); else montar();
   setInterval(() => { if (document.body && !document.getElementById('bf2-btn')) { root = null; montar(); } }, 2000); // se a tela do SGQ recriar a página, o botão volta
