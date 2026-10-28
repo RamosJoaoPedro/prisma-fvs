@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Prisma - FVS no SGQ
 // @namespace    realiza-bot-fvs
-// @version      2.19
+// @version      2.20
 // @author       João Pedro Ramos
 // @description  Prisma: mapa das torres, fila de comandos, relatórios e preenchimento de FVS no SGQ da Realiza, com travas de segurança. Usa o login do próprio usuário no SGQ.
 // @match        https://gdol.sgq2.com.br/*
@@ -17,7 +17,7 @@
 
   // ============================== CONFIGURAÇÃO PADRÃO ==============================
   // Tudo aqui pode ser trocado pela aba "Configuração" do painel (fica salvo no navegador).
-  const VERSAO = '2.19';
+  const VERSAO = '2.20';
   const CANAL = 'teste'; // 'oficial' ou 'teste' (o arquivo prisma-teste.user.js usa 'teste')
   const PADRAO = {
     obraNome: '', idObra: null,
@@ -321,6 +321,7 @@
       return { na, duvida, finais: Object.entries(finais).map(([f, s]) => `final ${f}: itens ${[...s].join(', ')} diferentes`), n: base.length, meus: base.filter((x) => x.meu).length };
     };
     const ap = calc(amostras.filter((x) => !x.hall)), hl = calc(amostras.filter((x) => x.hall));
+    if (!amostras.length) return { erro: `Achei ${aptos.length + halls.length} FVS finalizada(s) desse serviço na ${torreNome}, mas nenhuma tinha ficha encerrada para ler. Use "Montar na ficha" e marque na mão.` };
     const ref = (amostras.find((x) => !x.hall) || amostras[0]).itens;
     let pre = 0; for (const x of ref.sort((a, b) => a.o - b.o)) { if (/pessoal|epi|epc|ferrament|materia|treinad|liberad|projeto|conclu[ií]d|instalad/i.test(x.d || '') && x.o === pre + 1) pre = x.o; else break; }
     return { ap, hl, pre: pre || null, total: ref.length, itens: ref };
@@ -411,14 +412,16 @@
     let V = abertas[0], criada = false;
     const naTxt = g.na.length ? 'NA ' + g.na.join(', ') : 'sem NA';
 
+    const comOc = !!(t.oc && t.oc.length);
     if (!V) {
       if (verifs.length) {
+        if (comOc) return PEND('a verificação desta FVS já está encerrada: a ocorrência não foi criada (registre pela tela do SGQ)');
         if (t.acao === 'abrir') return OK('já tinha verificação encerrada');
         if (fv[0].status === 1) return OK('já estava encerrada e finalizada');
         if (simular) return OK('SIMULAÇÃO: só finalizaria a FVS (verificação já encerrada)');
         return (await finalizarFvs(idS)) ? OK('verificação já estava encerrada; FVS finalizada') : PEND('erro ao finalizar a FVS');
       }
-      if (simular) return OK(`SIMULAÇÃO: criaria a ficha em ${fmt(t.dAbrir)}, ${t.acao === 'abrir' ? `marcaria os itens 1 a ${g.pre} e deixaria iniciada` : `preencheria tudo e encerraria em ${fmt(t.dFechar)}`} (${naTxt})`);
+      if (simular) return OK(`SIMULAÇÃO: criaria a ficha em ${fmt(t.dAbrir)}, ${comOc ? `${t.acao === 'abrir' ? `marcaria os itens 1 a ${g.pre}` : 'preencheria os itens'}, marcaria R e criaria ocorrência no ${t.oc.map((o) => 'item ' + o.item).join(', ')} e deixaria iniciada (sem encerrar)` : t.acao === 'abrir' ? `marcaria os itens 1 a ${g.pre} e deixaria iniciada` : `preencheria tudo e encerraria em ${fmt(t.dFechar)}`} (${naTxt})`);
       const c = await api('POST', '/obras/inspecoes-obra/create', { idObraChecklistServico: idS, data: isoDia(t.dAbrir), campo1: null, campo2: null, campo3: null, campo4: null });
       if (c.st !== 200) return PEND('erro ao criar verificação: ' + msgErro(c));
       verifs = await listarVerif(idS); abertas = verifs.filter((i) => i.status === 0 || i.status === 3);
@@ -430,11 +433,12 @@
     const alvos = lista || [V];
     const res = [];
     for (let k = 0; k < alvos.length; k++) {
-      const rr = await processarVerif(t, g, alvos[k], criada && k === 0, simular, naTxt, idS);
+      const rr = await processarVerif(k === 0 ? t : { ...t, oc: [] }, g, alvos[k], criada && k === 0, simular, naTxt, idS); // ocorrência só na primeira verificação
       if (rr.resultado === 'PENDENTE') return PEND((alvos.length > 1 ? `verificação ${k + 1} de ${alvos.length}: ` : '') + rr.msg + (k && !simular ? ` (as ${k} anteriores já foram gravadas)` : ''));
       res.push(rr.msg);
     }
     const junta = (alvos.length > 1 ? `${alvos.length} verificações abertas, todas tratadas: ` : '') + (() => { const c = new Map(); res.forEach((m) => c.set(m, (c.get(m) || 0) + 1)); return [...c].map(([m, n]) => n > 1 ? `${m} (×${n})` : m).join(' | '); })();
+    if (comOc) return OK((simular ? 'SIMULAÇÃO: ' : '') + junta + ' · FVS fica aberta até a tratativa');
     if (simular) return OK('SIMULAÇÃO: ' + junta + (t.acao === 'fechar' ? ' e finalizaria' : ''));
     if (t.acao === 'abrir') return OK(junta);
     return (await finalizarFvs(idS)) ? OK(junta + ' e FVS finalizada') : PEND(junta + ', mas deu erro ao finalizar a FVS');
@@ -453,6 +457,7 @@
 
     const itens = ((await api('POST', '/obras/inspecoes-obra/' + V.idInspecaoObra + '/items', { page: 1, rowsPerPage: 300 })).j || {}).items || [];
     if (!itens.length) return PEND('verificação sem itens');
+    if (t.oc && t.oc.length) return processarOcorrencias(t, g, V, itens, simular, naTxt, idS, assumidaDe);
     const ruins = itens.filter((x) => ['R', 'X'].includes(x.inspecao1) || x.inspecao2);
     const lista2 = (arr) => arr.map((b) => `${parseInt(b.ordem, 10)}=${b.inspecao1}${b.inspecao2 ? '/' + b.inspecao2 : ''}`).join(', ');
     let aprov2 = [];
@@ -505,6 +510,40 @@
     }
     return OK(`${assumidaDe ? 'assumida de ' + assumidaDe + '; ' : ''}${aprov2.length ? '2ª inspeção aprovada; ' : ''}encerrada em ${fmt(t.dFechar)} (${Math.min(tot, dep.totalItens)}/${dep.totalItens})`);
   }
+  // Ocorrência pedida na fila (botão "Criar ocorrência"): preenche o resto pelo gabarito, cria a ocorrência SEM tratativa
+  // no item escolhido, marca o item como R e deixa a ficha INICIADA. O SGQ não deixa encerrar com ocorrência sem tratativa,
+  // então a FVS fica aberta até alguém fazer a tratativa. A ocorrência vem antes de salvar porque o SGQ recusa item R sem ocorrência.
+  async function processarOcorrencias(t, g, V, itens, simular, naTxt, idS, assumidaDe) {
+    const dia = t.acao === 'abrir' ? t.dAbrir : t.dFechar;
+    const alvo = [];
+    for (const oc of t.oc) {
+      const x = itens.find((i) => parseInt(i.ordem, 10) === +oc.item);
+      if (!x) return PEND(`ocorrência: a ficha não tem o item ${oc.item}`);
+      if (x.inspecao2) return PEND(`ocorrência: o item ${oc.item} já tem 2ª inspeção (${x.inspecao1}/${x.inspecao2}); registre pela tela do SGQ`);
+      alvo.push([oc, x]);
+    }
+    let preenchidos = 0;
+    for (const x of itens) {
+      const o = parseInt(x.ordem, 10);
+      if (alvo.some(([, y]) => y === x) || (t.acao === 'abrir' && o > g.pre)) continue;
+      if (!x.inspecao1) { x.inspecao1 = g.na.includes(o) ? 'N' : 'A'; x.dataInspecao1 = isoItem(g.pre && o <= g.pre ? t.dAbrir : t.dFechar); preenchidos++; }
+    }
+    const ocs = ((await api('POST', '/obras/inspecoes-obra/' + V.idInspecaoObra + '/ocorrencias', { page: 1, rowsPerPage: 200 })).j || {}).items || [];
+    // rodou de novo (ex.: o salvar falhou da outra vez): não cria a mesma ocorrência duas vezes
+    const novas = alvo.filter(([oc, x]) => !ocs.some((o) => o.idInspecaoObraItens === x.idInspecaoObraItens && String(o.descricao || '').trim() === oc.texto.trim()));
+    const txtItens = alvo.map(([oc]) => 'item ' + oc.item).join(', ');
+    if (simular) return OK(`${assumidaDe ? 'assumiria a ficha de ' + assumidaDe + ', ' : ''}preencheria ${preenchidos} itens, marcaria R e criaria ocorrência no ${txtItens} e deixaria a ficha iniciada, sem encerrar (${naTxt})`);
+    for (const [oc, x] of novas) {
+      const c = await api('POST', '/obras/inspecoes-obra/' + V.idInspecaoObra + '/ocorrencias/create', { idObra: CFG.idObra, idInspecaoObraItens: x.idInspecaoObraItens, inspecao: 1, descricao: oc.texto.trim(), dataDescricao: isoDia(dia), tratativa: null, dataTratativa: null });
+      if (c.st !== 200) return PEND(`erro ao criar a ocorrência do item ${oc.item}: ${msgErro(c)}`);
+    }
+    for (const [, x] of alvo) { x.inspecao1 = 'R'; x.dataInspecao1 = isoItem(dia); }
+    const s = await salvarFicha(V.idInspecaoObra, 3, itens, null);
+    if (!s.ok) return PEND(`ocorrência criada (${txtItens}), mas o SGQ recusou salvar a ficha: ${s.msg}`);
+    const dep = (await listarVerif(idS)).find((i) => i.idInspecaoObra === V.idInspecaoObra);
+    if (!dep || dep.status !== 3) return PEND('ocorrência criada, mas confira a ficha na tela (status ' + (dep ? dep.status : '?') + ')');
+    return OK(`${assumidaDe ? 'assumida de ' + assumidaDe + '; ' : ''}ocorrência criada no ${txtItens} (item marcado R); ficha iniciada, não encerrada até a tratativa`);
+  }
 
   // ---------------------------------- estado da tela ----------------------------------
   const S = Object.assign({
@@ -547,7 +586,11 @@
   #bf2 .body{flex:1;overflow:auto;padding:14px}
   #bf2 .lay{display:grid;grid-template-columns:clamp(210px,21%,280px) minmax(0,1fr) clamp(220px,23%,310px);gap:12px;align-items:start}
   @media (max-width:760px){#bf2 .lay{grid-template-columns:minmax(0,1fr)}}
-  #bf2 .card{background:#fff;border:1px solid var(--line);border-radius:12px;padding:12px;display:grid;gap:9px;min-width:0;box-shadow:0 1px 2px #001e440d}
+  #bf2 .card{background:#fff;border:1px solid var(--line);border-radius:12px;padding:12px;display:grid;grid-template-columns:minmax(0,1fr);align-content:start;gap:9px;min-width:0;box-shadow:0 1px 2px #001e440d}
+  #bf2 .gabt td:nth-child(2){min-width:260px}#bf2 .gabt th{white-space:nowrap}
+  #bf2 .modal{position:absolute;inset:0;z-index:5;background:#001e4499;display:grid;place-items:center;padding:16px}
+  #bf2 .modal .card{width:min(560px,100%);max-height:calc(100% - 20px);overflow:auto;box-shadow:0 20px 60px #001e4488}
+  #bf2 .modal .xm{justify-self:end;background:transparent;border:0;font:700 18px system-ui;color:var(--muted);cursor:pointer;line-height:1}
   #bf2 .card.topo{border-top:3px solid var(--roxo)}
   #bf2 h4{margin:0;font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);font-weight:700}
   #bf2 label{display:grid;gap:3px;font-size:12px;color:var(--muted)}
@@ -709,6 +752,7 @@
     const q = semAc(S.busca).trim();
     let cods = servicosDisponiveis().filter((c) => !q || semAc(c + ' ' + nomeLimpo(c)).includes(q) || semAc(c.replace(/FVS|\s/g, '')).includes(q.replace(/\s/g, '')));
     cods.sort(S.ordem === 'nome' ? (a, b) => nomeLimpo(a).localeCompare(nomeLimpo(b), 'pt') : (a, b) => a.localeCompare(b, 'pt', { numeric: true }));
+    if (!q && cods.length && !cods.includes(S.serv)) S.serv = cods[0]; // serviço guardado que não existe nesta obra (ex.: o 013 A do Varandas)
     const g = gabarito(S.serv, T.nome, false), gh = gabarito(S.serv, T.nome, true);
     const cont = { fin: 0, ini: 0, nao: 0 };
     est.todas.forEach((n) => { const s = statusCel(n, S.serv); if (cont[s] !== undefined) cont[s]++; });
@@ -720,7 +764,9 @@
         <input id="m-busca" type="search" placeholder="buscar: reboco, shaft, 028…" value="${esc(S.busca)}">
         <select id="m-serv">${cods.map((c) => `<option value="${esc(c)}" ${c === S.serv ? 'selected' : ''}>${S.ordem === 'nome' ? esc(nomeLimpo(c)) + ' · ' + esc(c.replace('FVS ', '')) : esc(c) + ' · ' + esc(nomeLimpo(c))}</option>`).join('')}</select>
         <div class="row"><span class="seg"><button data-o="cod" class="${S.ordem !== 'nome' ? 'on' : ''}">Nº FVS</button><button data-o="nome" class="${S.ordem === 'nome' ? 'on' : ''}">A–Z</button></span>
-          <span class="seg">${CFG.torres.map((t) => `<button data-t="${esc(t.nome)}" class="${t.nome === T.nome ? 'on' : ''}">${esc(t.nome)}</button>`).join('')}</span></div>
+          ${CFG.torres.length > 4 // muitas torres (ex.: 15 blocos): lista de escolha em vez de botões, que não cabiam no cartão
+            ? `<label style="flex:1;min-width:140px">Torre<select id="m-torre">${CFG.torres.map((t) => `<option value="${esc(t.nome)}" ${t.nome === T.nome ? 'selected' : ''}>${esc(t.nome)}</option>`).join('')}</select></label>`
+            : `<span class="seg">${CFG.torres.map((t) => `<button data-t="${esc(t.nome)}" class="${t.nome === T.nome ? 'on' : ''}">${esc(t.nome)}</button>`).join('')}</span>`}</div>
         <div class="muted">${cont.fin} finalizadas · ${cont.ini} iniciadas · ${cont.nao} não iniciadas${g ? `<br>Gabarito (${g.origem}): ${g.na.length ? 'NA ' + g.na.join(', ') : 'sem NA'}${gh && gh.na.join() !== g.na.join() ? ' · hall: NA ' + gh.na.join(', ') : ''}${g.pre ? ' · abrir: itens 1 a ' + g.pre : ''}` : ''}</div>
         <h4>Seleção</h4>
         <button class="b full" id="m-selini"><span style="color:#c98a00">■</span> Selecionar todos os amarelos</button>
@@ -739,7 +785,7 @@
         <button class="b p" id="m-add" ${!S.sel.length || !g || (S.acao === 'abrir' && !g.pre) ? 'disabled' : ''}>Adicionar à fila: ${S.acao === 'abrir' ? 'abrir' : 'fechar'} ${S.sel.length} local(is)</button>
       </div>
       <div class="card">
-        <div class="row" style="justify-content:space-between"><h4>${esc(T.nome)} · ${esc(T.bloco)} · ${esc(S.serv)} ${esc(nomeLimpo(S.serv))}</h4>
+        <div class="row" style="justify-content:space-between"><h4>${esc(T.nome)}${norm(T.nome) !== norm(T.bloco) ? ' · ' + esc(T.bloco) : ''} · ${esc(S.serv)}${nomeLimpo(S.serv) !== S.serv ? ' ' + esc(nomeLimpo(S.serv)) : ''}</h4>
           <span class="row"><span class="muted">${MAPA.ts[T.nome] ? 'lido às ' + new Date(MAPA.ts[T.nome]).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : 'ainda não lido'}</span><button class="b n" id="m-atu">Atualizar ${esc(T.nome)}</button></span></div>
         <div class="leg"><span><i style="background:#2f9a5a"></i>Finalizada</span><span><i style="background:#e3a21a"></i>Iniciada</span><span><i style="background:#d2463c"></i>Não iniciada</span><span><i style="background:#e6eaf1"></i>Sem esta FVS</span><span><i style="background:#6d3fd1;border-radius:50%"></i>R/X em aberto</span></div>
         ${est.outros.length ? `<div class="outros">${est.outros.map((n) => celula(n, n.replace(T.bloco + ' - ', '').replace(T.bloco, 'Bloco geral'), 'hall')).join('')}</div>` : ''}
@@ -752,7 +798,9 @@
     on('#m-busca', 'oninput', (e) => { S.busca = e.target.value; const first = servicosDisponiveis().find((c) => semAc(c + ' ' + nomeLimpo(c)).includes(semAc(S.busca).trim())); if (S.busca && first && !semAc(S.serv + ' ' + nomeLimpo(S.serv)).includes(semAc(S.busca).trim())) S.serv = first; salvarTela(); renderMapa(); const i = $('#m-busca'); i.focus(); i.setSelectionRange(i.value.length, i.value.length); });
     on('#m-serv', 'onchange', (e) => { S.serv = e.target.value; S.sel = []; salvarTela(); renderMapa(); });
     body.querySelectorAll('[data-o]').forEach((b) => b.onclick = () => { S.ordem = b.dataset.o; salvarTela(); renderMapa(); });
-    body.querySelectorAll('[data-t]').forEach((b) => b.onclick = async () => { S.torre = b.dataset.t; S.sel = []; salvarTela(); renderMapa(); const T2 = CFG.torres.find((t) => t.nome === S.torre); if (!MAPA.ts[S.torre]) { try { await atualizarTorre(T2); } catch (e) { status('Erro: ' + e.message); } renderMapa(); } });
+    const trocaTorre = async (nome) => { S.torre = nome; S.sel = []; salvarTela(); renderMapa(); const T2 = CFG.torres.find((t) => t.nome === S.torre); if (!MAPA.ts[S.torre]) { try { await atualizarTorre(T2); } catch (e) { status('Erro: ' + e.message); } renderMapa(); } };
+    body.querySelectorAll('[data-t]').forEach((b) => b.onclick = () => trocaTorre(b.dataset.t));
+    on('#m-torre', 'onchange', (e) => trocaTorre(e.target.value));
     body.querySelectorAll('[data-a]').forEach((b) => b.onclick = () => { S.acao = b.dataset.a; salvarTela(); renderMapa(); });
     on('#m-dA', 'onchange', (e) => { S.dAbrir = e.target.value; if (S.dFechar < S.dAbrir) S.dFechar = S.dAbrir; salvarTela(); renderMapa(); });
     on('#m-dF', 'onchange', (e) => { S.dFechar = e.target.value; salvarTela(); });
@@ -848,8 +896,63 @@
   // ------------------------------ aba FILA ------------------------------
   function tarefasDaFila() {
     const t = [];
-    FILA.forEach((g) => g.areas.forEach((area) => t.push({ grupo: g.id, area, fvs: g.fvs, acao: g.acao, dAbrir: g.dAbrir, dFechar: g.dFechar, na: g.na, pre: g.pre, opc: g.opc || {} })));
+    FILA.forEach((g) => g.areas.forEach((area) => t.push({ grupo: g.id, area, fvs: g.fvs, acao: g.acao, dAbrir: g.dAbrir, dFechar: g.dFechar, na: g.na, pre: g.pre, opc: g.opc || {}, oc: (g.oc || []).filter((o) => o.area === area) })));
     return t;
+  }
+  // ------------------------------ janela CRIAR OCORRÊNCIA (aba Fila) ------------------------------
+  // Só deixa escolher apartamento e serviço que estão na fila. Fica por cima do Prisma: nada mais responde até salvar ou fechar.
+  function abrirOcorrencia() {
+    if (ocupado()) return;
+    const areas = [...new Set(FILA.flatMap((g) => g.areas))].sort((a, b) => a.localeCompare(b, 'pt', { numeric: true }));
+    if (!areas.length) return status('A fila está vazia: ponha o apartamento e o serviço na fila primeiro.');
+    const M = { area: '', cod: '', itens: null };
+    const m = document.createElement('div'); m.className = 'modal'; m.id = 'oc-m';
+    m.innerHTML = `<div class="card topo" role="dialog" aria-modal="true" aria-label="Criar ocorrência">
+      <div class="row" style="justify-content:space-between"><h4>Criar ocorrência</h4><button class="xm" id="oc-x" title="Fechar sem salvar">×</button></div>
+      <div class="nota">Quando a fila rodar, o Prisma marca o item como <b>R</b>, cria a ocorrência <b>sem tratativa</b> e deixa a ficha <b>iniciada</b>: o SGQ não deixa encerrar até alguém fazer a tratativa.</div>
+      <label>Apartamento (só os que estão na fila)<input id="oc-qa" type="search" placeholder="buscar: 401, hall 3, bloco 02…"><select id="oc-a" size="6"></select></label>
+      <label>Serviço (só os deste local na fila)<input id="oc-qs" type="search" placeholder="buscar serviço…"><select id="oc-s" size="4"></select></label>
+      <label>Item da ficha<select id="oc-i" disabled><option>Escolha o apartamento e o serviço</option></select></label>
+      <label>O que foi encontrado<textarea id="oc-t" style="min-height:80px;font:inherit" placeholder="ex.: choco encontrado na sala e na cozinha"></textarea></label>
+      <div class="row"><button class="b p" id="oc-ok" disabled>Salvar ocorrência</button><button class="b" id="oc-c">Cancelar</button><span class="muted" id="oc-msg"></span></div></div>`;
+    root.appendChild(m);
+    const q = (s) => m.querySelector(s), msg = (t) => { q('#oc-msg').textContent = t; };
+    const fecha = () => { document.removeEventListener('keydown', tecla, true); m.remove(); };
+    const tecla = (e) => { if (e.key === 'Escape') { e.stopPropagation(); fecha(); } };
+    document.addEventListener('keydown', tecla, true);
+    const pode = () => { q('#oc-ok').disabled = !(M.area && M.cod && q('#oc-i').value && q('#oc-t').value.trim()); };
+    const listaA = () => { const f = semAc(q('#oc-qa').value).trim(); q('#oc-a').innerHTML = areas.filter((a) => !f || semAc(localComTorre(a) + ' ' + a).includes(f)).map((a) => `<option value="${esc(a)}" ${a === M.area ? 'selected' : ''}>${esc(localComTorre(a))}</option>`).join(''); };
+    const servs = () => [...new Set(FILA.filter((g) => g.areas.includes(M.area)).map((g) => g.fvs))];
+    const listaS = () => { const f = semAc(q('#oc-qs').value).trim(); q('#oc-s').innerHTML = M.area ? servs().filter((c) => !f || semAc(c + ' ' + nomeLimpo(c)).includes(f)).map((c) => `<option value="${esc(c)}" ${c === M.cod ? 'selected' : ''}>${esc(c.replace('FVS ', ''))} · ${esc(nomeLimpo(c))}</option>`).join('') : ''; };
+    const carregaItens = async () => {
+      const sel = q('#oc-i'); sel.disabled = true; sel.innerHTML = '<option>Buscando os itens da ficha no SGQ...</option>'; pode();
+      const cod = M.cod, area = M.area;
+      try {
+        let L = await itensDaFicha(cod);
+        const e = MAPA.areas[area] && MAPA.areas[area].fvs[cod];
+        if (!L && e) { const v = await listarVerif(e[0]); if (v.length) { const it = ((await api('POST', '/obras/inspecoes-obra/' + v[0].idInspecaoObra + '/items', { page: 1, rowsPerPage: 300 })).j || {}).items || []; if (it.length) L = it.map((x) => ({ o: parseInt(x.ordem, 10), d: (x.descricao || '').trim() })).sort((a, b) => a.o - b.o); } }
+        if (M.cod !== cod || M.area !== area) return; // trocou no meio
+        if (!L) { sel.innerHTML = '<option value="">Não achei os itens dessa FVS na obra</option>'; msg('Abra uma ficha dessa FVS pelo SGQ uma vez e tente de novo.'); return; }
+        sel.innerHTML = '<option value="">Escolha o item…</option>' + L.map((x) => `<option value="${x.o}">${x.o} · ${esc(x.d.length > 90 ? x.d.slice(0, 90) + '…' : x.d)}</option>`).join('');
+        M.itens = L; sel.disabled = false; msg('');
+      } catch (err) { sel.innerHTML = '<option value="">Erro ao ler os itens</option>'; msg('Erro: ' + err.message); }
+      pode();
+    };
+    listaA();
+    q('#oc-qa').oninput = listaA;
+    q('#oc-a').onchange = (e) => { M.area = e.target.value; M.cod = ''; M.itens = null; q('#oc-qs').value = ''; listaS(); const s = servs(); if (s.length === 1) { M.cod = s[0]; listaS(); carregaItens(); } else { q('#oc-i').disabled = true; q('#oc-i').innerHTML = '<option>Escolha o serviço</option>'; } pode(); };
+    q('#oc-qs').oninput = listaS;
+    q('#oc-s').onchange = (e) => { M.cod = e.target.value; carregaItens(); };
+    q('#oc-i').onchange = pode; q('#oc-t').oninput = pode;
+    q('#oc-x').onclick = fecha; q('#oc-c').onclick = fecha;
+    q('#oc-ok').onclick = () => {
+      const item = +q('#oc-i').value, texto = q('#oc-t').value.trim(); if (!M.area || !M.cod || !item || !texto) return;
+      const g = FILA.find((x) => x.fvs === M.cod && x.areas.includes(M.area)); if (!g) return msg('Esse local saiu da fila.');
+      const it = (M.itens || []).find((x) => x.o === item) || {};
+      g.oc = (g.oc || []).filter((o) => !(o.area === M.area && o.item === item)).concat({ id: Date.now(), area: M.area, item, itemDesc: it.d || '', texto });
+      salvarFila(); fecha(); status(`Ocorrência guardada na fila: ${localComTorre(M.area)} · ${M.cod} · item ${item}. Ela é criada no SGQ quando a fila rodar.`); render();
+    };
+    setTimeout(() => q('#oc-qa').focus(), 0);
   }
   function renderFila() {
     const body = $('#bf2-body');
@@ -860,13 +963,15 @@
         ${FILA.map((g) => `<tr><td><b>${esc(g.fvs)}</b><br><span class="muted">${esc(nomeLimpo(g.fvs))}</span></td><td>${g.acao === 'abrir' ? 'Abrir' : 'Fechar'}</td>
           <td>${g.acao === 'abrir' ? 'abre ' + fmt(g.dAbrir) : 'abre ' + fmt(g.dAbrir) + '<br>fecha ' + fmt(g.dFechar)}</td>
           <td>${g.areas.map((a) => esc(localComTorre(a))).join(', ')}</td>
-          <td class="muted">${[g.opc && g.opc.assumir ? 'assume fichas da lista' : '', g.opc && g.opc.segunda ? '2ª inspeção' + (g.opc.tratativa ? ': "' + esc(g.opc.tratativa) + '"' : '') : '', g.na ? 'gabarito do roteiro' : ''].filter(Boolean).join('<br>')}</td>
+          <td class="muted">${[g.opc && g.opc.assumir ? 'assume fichas da lista' : '', g.opc && g.opc.segunda ? '2ª inspeção' + (g.opc.tratativa ? ': "' + esc(g.opc.tratativa) + '"' : '') : '', g.na ? 'gabarito do roteiro' : ''].filter(Boolean).join('<br>')}
+            ${(g.oc || []).map((o) => `<div style="color:var(--verm)">ocorrência · ${esc(localCurto(o.area))} · item ${o.item}: "${esc(o.texto.length > 60 ? o.texto.slice(0, 60) + '…' : o.texto)}" <a href="#" data-ocdel="${g.id}|${o.id}" style="color:var(--muted)">tirar</a></div>`).join('')}</td>
           <td><button class="b" data-del="${g.id}" ${RODANDO ? 'disabled' : ''}>Tirar</button></td></tr>`).join('')}</table>` : '<div class="muted">A fila está vazia. Monte no Mapa ou cole um roteiro.</div>'}
       <div class="row">
         <button class="b" id="f-sim" ${FILA.length && !RODANDO ? '' : 'disabled'}>Simular (não grava)</button>
         <button class="b p" id="f-run" ${FILA.length && !RODANDO ? '' : 'disabled'}>Executar no SGQ</button>
         <button class="b w" id="f-stop" ${RODANDO ? '' : 'disabled'}>Parar</button>
         <button class="b" id="f-limpa" ${FILA.length && !RODANDO ? '' : 'disabled'}>Esvaziar fila</button>
+        <button class="b" id="f-oc" ${FILA.length && !RODANDO ? '' : 'disabled'} style="border-color:var(--verm);color:var(--verm)">Criar ocorrência</button>
       </div>
       <h4>Planos (para repetir, ex.: abrir na segunda e fechar na sexta)</h4>
       <div class="row"><input id="p-nome" placeholder="nome do plano, ex.: semana 20/10" style="max-width:260px"><button class="b" id="p-salva" ${FILA.length ? '' : 'disabled'}>Salvar fila como plano</button></div>
@@ -879,9 +984,11 @@
     body.querySelectorAll('[data-del]').forEach((b) => b.onclick = () => { if (ocupado()) return; FILA = FILA.filter((g) => String(g.id) !== b.dataset.del); salvarFila(); render(); });
     $('#f-limpa').onclick = () => { if (ocupado()) return; if (confirm('Esvaziar a fila?')) { FILA = []; salvarFila(); render(); } };
     $('#f-stop').onclick = () => { if (!RODANDO) return; PARAR = true; status('Parando depois da ficha atual...'); };
+    $('#f-oc').onclick = abrirOcorrencia;
+    body.querySelectorAll('[data-ocdel]').forEach((a) => a.onclick = (e) => { e.preventDefault(); if (ocupado()) return; const [gid, oid] = a.dataset.ocdel.split('|'); const g = FILA.find((x) => String(x.id) === gid); if (g) g.oc = (g.oc || []).filter((o) => String(o.id) !== oid); salvarFila(); render(); });
     $('#f-sim').onclick = () => rodarFila(true);
     $('#f-run').onclick = () => rodarFila(false);
-    $('#p-salva').onclick = () => { const n = ($('#p-nome').value || '').trim() || ('plano ' + new Date().toLocaleDateString('pt-BR')); PLANOS[n] = JSON.parse(JSON.stringify(FILA)); LS.set(K('planos'), PLANOS); status('Plano "' + n + '" salvo.'); render(); };
+    $('#p-salva').onclick = () => { const n = ($('#p-nome').value || '').trim() || ('plano ' + new Date().toLocaleDateString('pt-BR')); PLANOS[n] = JSON.parse(JSON.stringify(FILA)).map(({ oc, ...g }) => g); LS.set(K('planos'), PLANOS); status('Plano "' + n + '" salvo.'); render(); };
     body.querySelectorAll('[data-pl]').forEach((b) => b.onclick = () => { FILA = FILA.concat(JSON.parse(JSON.stringify(PLANOS[b.dataset.pl])).map((g, i) => ({ ...g, id: Date.now() + i }))); salvarFila(); render(); });
     body.querySelectorAll('[data-plf]').forEach((b) => b.onclick = () => { const df = $('#p-df').value || hojeStr(); FILA = FILA.concat(JSON.parse(JSON.stringify(PLANOS[b.dataset.plf])).map((g, i) => ({ ...g, id: Date.now() + i, acao: 'fechar', dFechar: df }))); salvarFila(); status('Plano carregado como FECHAR em ' + fmt(df) + '. As fichas mantêm a data de abertura do plano.'); render(); });
     body.querySelectorAll('[data-pld]').forEach((b) => b.onclick = () => { if (confirm('Apagar o plano "' + b.dataset.pld + '"?')) { delete PLANOS[b.dataset.pld]; LS.set(K('planos'), PLANOS); render(); } });
@@ -916,7 +1023,7 @@
       if (r.resultado === 'PENDENTE' && /funcion[aá]rio vinculado/i.test(r.msg || '')) { PARAR = true; r.msg += ' · Seu login do SGQ está sem funcionário vinculado: o próprio SGQ recusa qualquer gravação, até pela tela. Fila parada para não repetir o erro em todas as fichas. Peça para a TI/administrador do SGQ vincular seu usuário ao seu cadastro de funcionário e rode de novo.'; status('Fila parada: seu login do SGQ está sem funcionário vinculado. Fale com a TI e rode de novo depois.'); }
       RESULT.push({ area: t.area, fvs: t.fvs, acao: t.acao, ...r, quando: new Date().toLocaleString('pt-BR'), simulacao: simular });
       if (!simular) { HIST.push({ q: new Date().toISOString(), a: t.area, f: t.fvs, ac: t.acao, r: r.resultado, d: r.msg, src: 'prisma', u: CFG.nomeInspecionado }); if (HIST.length > 6000) HIST = HIST.slice(-6000); salvarHist(); }
-      if (!simular && r.resultado === 'OK') { feitos.add(t.area); const g = FILA.find((x) => x.id === t.grupo); if (g) g.areas = g.areas.filter((a) => a !== t.area); }
+      if (!simular && r.resultado === 'OK') { feitos.add(t.area); const g = FILA.find((x) => x.id === t.grupo); if (g) { g.areas = g.areas.filter((a) => a !== t.area); g.oc = (g.oc || []).filter((o) => o.area !== t.area); } }
       const fr = $('#f-res'); if (fr) fr.innerHTML = tabelaRes(RESULT);
     }
     LS.set(K('result'), RESULT);
@@ -991,8 +1098,12 @@
       <div class="nota">O gabarito diz quais itens vão como <b>NA</b> (não se aplica) e quais vão como <b>A</b>, e até qual item são os pré-requisitos marcados quando a ficha é <b>aberta</b>. Cada pessoa e cada obra pode ter o seu.</div>
       <label>Serviço<select id="g-cod"><option value="">Escolha um serviço…</option>${cods.map((c) => `<option value="${esc(c)}" ${c === cod ? 'selected' : ''}>${esc(c)} · ${esc(nomeLimpo(c))}${GAB_USER[c] ? ' (seu)' : GABP()[c] ? ' (padrão)' : ''}</option>`).join('')}</select></label>
       ${cod ? `<div class="muted"><b>Atual:</b> ${esc(resumo(g))}</div>
-      <div class="row"><button class="b p" id="g-ficha">Montar na ficha</button>${CFG.torres.map((t) => `<button class="b" data-apr="${esc(t.nome)}">Aprender pela ${esc(t.nome)}</button>`).join('')}${GAB_USER[cod] ? '<button class="b w" id="g-pad">Apagar o meu gabarito deste serviço</button>' : ''}</div>
-      <div id="g-ed"></div><div id="g-out" class="muted"></div>` : '<div class="muted">Nada é lido do SGQ até você escolher um serviço.</div>'}</div>`;
+      <div class="row"><button class="b p" id="g-ficha">Montar na ficha</button>
+        ${CFG.torres.length > 3
+          ? `<select id="g-torre" style="width:auto">${CFG.torres.map((t) => `<option ${t.nome === (S.gabTorre || CFG.torres[0].nome) ? 'selected' : ''}>${esc(t.nome)}</option>`).join('')}</select><button class="b" id="g-apr1">Aprender por esta torre</button>`
+          : CFG.torres.map((t) => `<button class="b" data-apr="${esc(t.nome)}">Aprender pela ${esc(t.nome)}</button>`).join('')}
+        ${GAB_USER[cod] ? '<button class="b w" id="g-pad">Apagar o meu gabarito deste serviço</button>' : ''}</div>
+      <div id="g-out" class="muted"></div><div id="g-ed"></div>` : '<div class="muted">Nada é lido do SGQ até você escolher um serviço.</div>'}</div>`;
     $('#g-cod').onchange = (e) => { S.gabCod = e.target.value; ED = null; salvarTela(); renderGab(); };
     if (!cod) return;
     const bp = $('#g-pad'); if (bp) bp.onclick = () => { if (confirm('Apagar o seu gabarito de ' + cod + '?')) { delete GAB_USER[cod]; LS.set(K('gab'), GAB_USER); ED = null; renderGab(); } };
@@ -1005,34 +1116,52 @@
         ED = edDe(cod, it); out.textContent = ''; desenharEditor();
       } catch (e) { out.textContent = 'Erro: ' + e.message; }
     };
-    body.querySelectorAll('[data-apr]').forEach((b) => b.onclick = async () => {
-      const out = $('#g-out'); out.textContent = 'Lendo fichas encerradas...';
+    // A mensagem do "Aprender" fica acima da ficha: antes ficava embaixo da tabela e, com muitas torres, ninguém via (parecia que o botão não fazia nada).
+    const aprender = async (nome) => {
+      const out = $('#g-out'); const diz = (m) => { if (out) out.textContent = m; status(m); };
+      diz('Aprender pela ' + nome + ': lendo fichas encerradas...');
       try {
-        const T = CFG.torres.find((t) => t.nome === b.dataset.apr);
-        if (!MAPA.ts[T.nome]) await atualizarTorre(T);
-        const r = await aprenderGabarito(cod, T.nome, (m) => { out.textContent = m; });
-        if (r.erro) { out.textContent = r.erro; return; }
+        const T = CFG.torres.find((t) => t.nome === nome);
+        if (!MAPA.ts[T.nome]) { diz('Lendo o mapa da ' + T.nome + ' primeiro (pode levar um minuto)...'); await atualizarTorre(T); }
+        const r = await aprenderGabarito(cod, T.nome, diz);
+        if (r.erro) { diz(r.erro); return; }
         if (!ED) ED = edDe(cod, r.itens.map((x) => ({ o: x.o, d: x.d })).sort((p, q) => p.o - q.o));
-        if (r.ap) ED.na[T.nome] = new Set(r.ap.na);
+        // Serviço ainda sem gabarito numa obra de muitas torres: o aprendido vale para todas (ajuste depois a torre que for diferente).
+        const paraTodas = CFG.torres.length > 3 && !(GAB_USER[cod] || GABP()[cod]);
+        if (r.ap) (paraTodas ? CFG.torres : [T]).forEach((t) => { ED.na[t.nome] = new Set(r.ap.na); });
         if (r.hl) ED.hall = new Set(r.hl.na);
         if (r.pre && !ED.pre) ED.pre = r.pre;
+        if (CFG.torres.length > 3) ED.modo = paraTodas ? '*' : T.nome;
         desenharEditor();
-        out.innerHTML = `<b>Aprendido pela ${esc(T.nome)}:</b> ${r.ap ? `${r.ap.n} ficha(s)${r.ap.meus ? ', ' + r.ap.meus + ' suas' : ' de outras pessoas'}` : 'sem fichas de apto'}${r.hl ? ` · hall: ${r.hl.n} ficha(s)` : ''}${[...(r.ap ? r.ap.duvida : []), ...(r.ap ? r.ap.finais : [])].map((x) => '<br>⚠ ' + esc(x)).join('')}<br>Confira na ficha acima e clique em <b>Salvar gabarito</b>.`;
-      } catch (e) { out.textContent = 'Erro: ' + e.message; }
-    });
+        out.innerHTML = `<b>Aprendido pela ${esc(T.nome)}:</b> ${r.ap ? `${r.ap.n} ficha(s)${r.ap.meus ? ', ' + r.ap.meus + ' suas' : ' de outras pessoas'}` : 'sem fichas de apto'}${r.hl ? ` · hall: ${r.hl.n} ficha(s)` : ''}${[...(r.ap ? r.ap.duvida : []), ...(r.ap ? r.ap.finais : [])].map((x) => '<br>⚠ ' + esc(x)).join('')}<br>Confira na ficha abaixo e clique em <b>Salvar gabarito</b>.`;
+        status('Gabarito aprendido pela ' + T.nome + '. Confira e salve.');
+      } catch (e) { diz('Erro: ' + e.message); }
+    };
+    body.querySelectorAll('[data-apr]').forEach((b) => b.onclick = () => aprender(b.dataset.apr));
+    const gt = $('#g-torre'); if (gt) gt.onchange = (e) => { S.gabTorre = e.target.value; salvarTela(); };
+    const ga1 = $('#g-apr1'); if (ga1) ga1.onclick = () => aprender($('#g-torre').value);
     if (ED && ED.cod === cod) desenharEditor();
   }
   function desenharEditor() {
     const box = $('#g-ed'); if (!box || !ED) return;
-    const tog = (on, attrs) => `<span class="seg"><button ${attrs} data-v="A" class="${!on ? 'on' : ''}">A</button><button ${attrs} data-v="N" class="${on ? 'on' : ''}">NA</button></span>`;
-    box.innerHTML = `<div style="overflow:auto"><table><tr><th>Nº</th><th>Item da ficha</th>${CFG.torres.map((t) => `<th>Aptos ${esc(t.nome)}</th>`).join('')}<th>Hall ${ED.hall ? '' : '(igual aptos)'}</th><th>Abrir até aqui</th></tr>
-      <tr><td></td><td class="muted">Sem pré-requisitos (só fechar)</td>${CFG.torres.map(() => '<td></td>').join('')}<td><label class="row" style="display:flex"><input type="checkbox" id="g-hallsep" ${ED.hall ? 'checked' : ''} style="width:auto"> hall diferente</label></td><td><input type="radio" name="g-pre" value="0" ${!ED.pre ? 'checked' : ''} style="width:auto"></td></tr>
+    const tog = (on, attrs) => `<span class="seg" ${on === null ? 'title="Varia entre as torres"' : ''}><button ${attrs} data-v="A" class="${on === false ? 'on' : ''}">A</button><button ${attrs} data-v="N" class="${on ? 'on' : ''}">NA</button></span>`;
+    // Até 3 torres: uma coluna por torre, lado a lado. Mais que isso (ex.: 15 blocos): uma coluna só, editando
+    // "todas as torres juntas" ou uma torre escolhida na lista; antes a tabela ficava gigante e o texto do item espremido.
+    const muitas = CFG.torres.length > 3;
+    if (muitas && !ED.modo) { const vals = CFG.torres.map((t) => [...ED.na[t.nome]].sort().join()); ED.modo = vals.every((v) => v === vals[0]) ? '*' : CFG.torres[0].nome; }
+    const cols = muitas ? [ED.modo] : CFG.torres.map((t) => t.nome);
+    const valor = (col, o) => { if (col !== '*') return ED.na[col].has(o); const n = CFG.torres.filter((t) => ED.na[t.nome].has(o)).length; return n === 0 ? false : n === CFG.torres.length ? true : null; };
+    box.innerHTML = `${muitas ? `<div class="row"><label style="max-width:320px">Editando os aptos de<select id="g-modo"><option value="*" ${ED.modo === '*' ? 'selected' : ''}>Todas as torres juntas</option>${CFG.torres.map((t) => `<option ${ED.modo === t.nome ? 'selected' : ''}>${esc(t.nome)}</option>`).join('')}</select></label>
+        <span class="muted">Em "todas juntas", um clique vale para as ${CFG.torres.length} torres. Escolha uma torre só quando ela for diferente.</span></div>` : ''}
+      <div style="overflow:auto"><table class="gabt"><tr><th>Nº</th><th>Item da ficha</th>${cols.map((c) => `<th>Aptos ${c === '*' ? '(todas as torres)' : esc(c)}</th>`).join('')}<th>Hall ${ED.hall ? '' : '(igual aptos)'}</th><th>Abrir até aqui</th></tr>
+      <tr><td></td><td class="muted">Sem pré-requisitos (só fechar)</td>${cols.map(() => '<td></td>').join('')}<td><label class="row" style="display:flex"><input type="checkbox" id="g-hallsep" ${ED.hall ? 'checked' : ''} style="width:auto"> hall diferente</label></td><td><input type="radio" name="g-pre" value="0" ${!ED.pre ? 'checked' : ''} style="width:auto"></td></tr>
       ${ED.itens.map((x) => `<tr style="${ED.pre && x.o <= ED.pre ? 'background:var(--roxoSoft)' : ''}"><td><b>${x.o}</b></td><td>${esc(x.d)}</td>
-        ${CFG.torres.map((t) => `<td>${tog(ED.na[t.nome].has(x.o), `data-t="${esc(t.nome)}" data-o="${x.o}"`)}</td>`).join('')}
+        ${cols.map((c) => `<td>${tog(valor(c, x.o), `data-t="${esc(c)}" data-o="${x.o}"`)}${valor(c, x.o) === null ? ' <span class="muted" style="font-size:11px">varia</span>' : ''}</td>`).join('')}
         <td>${ED.hall ? tog(ED.hall.has(x.o), `data-h="1" data-o="${x.o}"`) : '<span class="muted">—</span>'}</td>
         <td><input type="radio" name="g-pre" value="${x.o}" ${ED.pre === x.o ? 'checked' : ''} style="width:auto"></td></tr>`).join('')}</table></div>
       <div class="row"><button class="b p" id="g-salva">Salvar gabarito</button><span class="muted">Linhas em roxo = pré-requisitos marcados ao abrir a ficha.</span></div>`;
-    box.querySelectorAll('[data-t]').forEach((b) => b.onclick = () => { const s = ED.na[b.dataset.t], o = +b.dataset.o; if (b.dataset.v === 'N') s.add(o); else s.delete(o); desenharEditor(); });
+    const gm = $('#g-modo'); if (gm) gm.onchange = (e) => { ED.modo = e.target.value; desenharEditor(); };
+    box.querySelectorAll('[data-t]').forEach((b) => b.onclick = () => { const o = +b.dataset.o; const alvo = b.dataset.t === '*' ? CFG.torres.map((t) => ED.na[t.nome]) : [ED.na[b.dataset.t]]; alvo.forEach((s) => { if (b.dataset.v === 'N') s.add(o); else s.delete(o); }); desenharEditor(); });
     box.querySelectorAll('[data-h]').forEach((b) => b.onclick = () => { const o = +b.dataset.o; if (b.dataset.v === 'N') ED.hall.add(o); else ED.hall.delete(o); desenharEditor(); });
     box.querySelectorAll('[name="g-pre"]').forEach((r) => r.onchange = () => { ED.pre = +r.value; desenharEditor(); });
     $('#g-hallsep').onchange = (e) => { ED.hall = e.target.checked ? new Set(ED.na[CFG.torres[0].nome]) : null; desenharEditor(); };
@@ -1683,7 +1812,8 @@ Data do PPC: [data]`;
   function renderCfg() {
     const body = $('#bf2-body');
     let funcs = []; try { funcs = JSON.parse(localStorage.getItem('funcionarios-dropdown') || '[]'); } catch (e) {}
-    const obraAtualId = +(S.cfgObra || CFG.idObra) || 0;
+    // sem obra escolhida ainda, vale a que aparece na lista (antes o "Gerar diagnóstico" ficava travado mesmo com a obra na tela)
+    const obraAtualId = +(S.cfgObra || CFG.idObra || (LS.get('obras', [])[0] || {}).id) || 0;
     const ids = new Set(funcs.map((f) => +f.idFuncionario)); LS.get('funcs_' + obraAtualId, []).forEach((f) => { if (!ids.has(+f.idFuncionario)) funcs.push(f); });
     funcs = funcs.map((f) => ({ id: +f.idFuncionario, cc: +f.idCentroCusto || 0, nome: (f.nome || '').replace(/\s+/g, ' ').trim() })).filter((f) => f.nome).sort((a, b) => a.nome.localeCompare(b.nome, 'pt'));
     const OBRAS = LS.get('obras', []);
@@ -1711,10 +1841,18 @@ Data do PPC: [data]`;
       <details><summary>Avançado</summary><label style="margin-top:8px;max-width:240px">Pausa entre consultas ao SGQ (ms)<input id="k-pausa" type="number" min="200" value="${esc(CFG.pausaMs)}"></label>
         <label style="margin-top:8px;max-width:340px">Consultas ao mesmo tempo ao ler mapa e relatórios (1 a 6; gravar é sempre uma por vez)<input id="k-par" type="number" min="1" max="6" value="${esc(CFG.leiturasJuntas || 3)}"></label></details>
       <div class="row"><button class="b p" id="k-salva">Salvar configuração</button><button class="b" id="k-reset">Voltar ao padrão</button></div></div>${perfilHtml()}`;
-    ligarPerfil((D) => {
-      if (+D.idObra !== +CFG.idObra) return status('Esse diagnóstico é de outra obra. Salve a configuração com ela primeiro.');
+    // "Salvar perfil" com a configuração ainda não salva para esta obra (ex.: gerou o diagnóstico antes de salvar):
+    // salva a configuração sozinho com o que está na tela e segue, em vez de mandar a pessoa voltar lá em cima.
+    ligarPerfil(async (D) => {
+      let agora = false;
+      if (+D.idObra !== +CFG.idObra || !configurado()) {
+        status('Salvando a configuração com esta obra...');
+        if (!(await salvarConfig(D))) { const b = $('#bf2-body'); if (b) b.scrollTop = 0; return; }
+        agora = true;
+        if (+D.idObra !== +CFG.idObra) { DIAG = null; render(); return status('A obra escolhida em "Obra" é outra que a do desenho. Configuração salva; gere o diagnóstico de novo para conferir as torres.'); }
+      }
       if (!salvarPerfil(D)) return;
-      if (S.pfPrimeira) { S.pfPrimeira = false; DIAG = null; status('Perfil salvo. Abrindo o mapa...'); S.aba = 'mapa'; abrir(); }
+      if (S.pfPrimeira || agora) { S.pfPrimeira = false; DIAG = null; status('Perfil salvo. Abrindo o mapa...'); S.aba = 'mapa'; abrir(); }
       else { status('Perfil salvo: ' + CFG.torres.map((t) => t.nome).join(', ') + '.'); DIAG = null; render(); }
     });
     $('#k-diag').onclick = async () => { const s = $('#k-obra'); const id = +s.value; if (!id) return; guardar(); try { await gerarDiagnostico(id, s.options[s.selectedIndex].text); renderCfg(); const pf = $('#k-perfil'); if (pf) pf.scrollIntoView({ behavior: 'smooth' }); } catch (e) { status('Erro: ' + e.message); } };
@@ -1745,8 +1883,8 @@ Data do PPC: [data]`;
       if (!L.length) { $('#k-obras').textContent = 'Nenhuma obra encontrada para este login.'; return; }
       LS.set('obras', L); if (!S.cfgObra) S.cfgObra = L[0].id; renderCfg(); status(L.length + ' obra(s) encontrada(s).');
     };
-    $('#k-salva').onclick = async () => {
-      const acha = (nome) => funcs.find((f) => norm(f.nome) === norm(nome));
+    // D = diagnóstico já conferido na tela (vindo do "Salvar perfil"): usa ele em vez de ler a obra de novo. Retorna true se salvou.
+    const salvarConfig = async (D) => {
       const pega = (id) => { const e = $('#' + id); const v = e ? +e.value : 0; return funcs.find((f) => f.id === v) || null; };
       const fi = pega('k-insp') || (CFG.idInspecionado && !funcs.length ? { id: CFG.idInspecionado, nome: CFG.nomeInspecionado } : null);
       const fa = pega('k-apr') || (CFG.idAprovado && !funcs.length ? { id: CFG.idAprovado, nome: CFG.nomeAprovado } : null);
@@ -1769,16 +1907,21 @@ Data do PPC: [data]`;
       if (mudouObra) {
         AREAS = null; NOMES = LS.get(K('nomes'), {}); MAPA = LS.get(K('mapa'), { ts: {}, areas: {} }); GAB_USER = LS.get(K('gab'), {}); FILA = LS.get(K('fila'), []); PLANOS = LS.get(K('planos'), {}); HIST = LS.get(K('hist'), []);
         CFG.torres = []; zerarLeitura();
-        try { const D = await gerarDiagnostico(idObra, obraNome); CFG.torres = D.torres.map((t) => ({ nome: t.nome, bloco: t.bloco, hall: t.hall, pos: t.pos, meio: t.meio, tipo: t.tipo })); novo.torres = CFG.torres; } catch (e) { status('Erro ao ler a obra: ' + e.message); }
+        try { const Dg = D && +D.idObra === idObra ? D : await gerarDiagnostico(idObra, obraNome); CFG.torres = Dg.torres.map((t) => ({ nome: t.nome, bloco: t.bloco, hall: t.hall, pos: t.pos, meio: t.meio, tipo: t.tipo })); novo.torres = CFG.torres; } catch (e) { status('Erro ao ler a obra: ' + e.message); }
         S.torre = (CFG.torres[0] || {}).nome || '';
         LS.set('cfg', novo);
+        if (D) return CFG.torres.length > 0;
         S.pfPrimeira = true;
         if (!CFG.torres.length) { render(); return status('Não reconheci as torres pelos nomes das áreas. Clique em "Copiar diagnóstico" e mande para o Claude.'); }
         render(); const pf = $('#k-perfil'); if (pf) pf.scrollIntoView({ behavior: 'smooth' });
         return status('Configuração salva. Agora confira o perfil da obra (logo abaixo) e clique em "Salvar perfil e continuar".');
       }
-      LS.set('cfg', novo); status(configurado() ? 'Configuração salva. Torres encontradas: ' + CFG.torres.map((t) => t.nome).join(', ') + '.' : 'Configuração salva.'); if (configurado() && mudouObra) { S.aba = 'mapa'; abrir(); } else render();
+      LS.set('cfg', novo);
+      if (D) return true;
+      status(configurado() ? 'Configuração salva. Torres encontradas: ' + CFG.torres.map((t) => t.nome).join(', ') + '.' : 'Configuração salva.'); if (configurado() && mudouObra) { S.aba = 'mapa'; abrir(); } else render();
+      return true;
     };
+    $('#k-salva').onclick = () => salvarConfig();
     $('#k-reset').onclick = () => { if (confirm('Voltar a configuração ao padrão do script?')) { LS.set('cfg', {}); CFG = Object.assign({}, PADRAO); render(); } };
   }
 
