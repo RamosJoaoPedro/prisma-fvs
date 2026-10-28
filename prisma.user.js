@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Prisma - FVS no SGQ
 // @namespace    realiza-bot-fvs
-// @version      2.20
+// @version      2.21
 // @author       João Pedro Ramos
 // @description  Prisma: mapa das torres, fila de comandos, relatórios e preenchimento de FVS no SGQ da Realiza, com travas de segurança. Usa o login do próprio usuário no SGQ.
 // @match        https://gdol.sgq2.com.br/*
@@ -17,7 +17,7 @@
 
   // ============================== CONFIGURAÇÃO PADRÃO ==============================
   // Tudo aqui pode ser trocado pela aba "Configuração" do painel (fica salvo no navegador).
-  const VERSAO = '2.20';
+  const VERSAO = '2.21';
   const CANAL = 'oficial'; // 'oficial' ou 'teste' (o arquivo prisma-teste.user.js usa 'teste')
   const PADRAO = {
     obraNome: '', idObra: null,
@@ -569,7 +569,14 @@
   #bf2-btn.gira::before,#bf2 .marca .ic.gira::before{animation:bf2gira .7s cubic-bezier(.3,.7,.3,1) var(--d,0ms) both}
   @media (prefers-reduced-motion:reduce){#bf2-btn.gira::before,#bf2 .marca .ic.gira::before{animation:none}}
   #bf2{--nav:#001e44;--roxo:#6d3fd1;--roxo2:#5a2fbf;--roxoSoft:#efe9fd;--verm:#cd143e;--bg:#f3f5f9;--line:#dfe4ec;--ink:#14213d;--muted:#64708a;
-    position:fixed;inset:12px;z-index:2147483001;background:var(--bg);color:var(--ink);border-radius:14px;box-shadow:0 10px 50px #001e4466;font:13px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif;display:none;flex-direction:column;overflow:hidden}
+    position:fixed;inset:12px;z-index:2147483001;background:var(--bg);color:var(--ink);border-radius:14px;box-shadow:0 10px 50px #001e4466;font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif;display:none;flex-direction:column;overflow:hidden;
+    transform-origin:calc(100% - 74px) calc(100% - 76px)}
+  /* abrir e fechar no estilo do Mac: a janela cresce a partir do botão Prisma e volta para ele ao fechar */
+  @keyframes bf2abre{from{opacity:0;transform:scale(.04)}35%{opacity:1}to{opacity:1;transform:none}}
+  @keyframes bf2fecha{from{opacity:1;transform:none}70%{opacity:1}to{opacity:0;transform:scale(.04)}}
+  #bf2.abre{animation:bf2abre .42s cubic-bezier(.16,1,.3,1)}
+  #bf2.fecha{animation:bf2fecha .3s cubic-bezier(.55,0,.75,.3) forwards;pointer-events:none}
+  @media (prefers-reduced-motion:reduce){#bf2.abre,#bf2.fecha{animation-duration:1ms}}
   #bf2 *{box-sizing:border-box}
   #bf2 .top{display:flex;align-items:center;gap:14px;padding:10px 16px;background:var(--nav);color:#fff;flex-wrap:wrap}
   #bf2 .marca{display:flex;align-items:center;gap:10px}
@@ -611,7 +618,14 @@
   #bf2 .seg button{border:0;background:transparent;padding:7px 12px;cursor:pointer;font:600 12.5px system-ui,sans-serif;color:var(--muted)}
   #bf2 .seg button.on{background:var(--nav);color:#fff}
   #bf2 .chk{display:flex;gap:8px;align-items:center;font:700 11.5px system-ui,sans-serif;letter-spacing:.04em;color:var(--ink);text-transform:uppercase;padding:7px 9px;border:1px solid var(--line);border-radius:8px;cursor:pointer}
-  #bf2 .chk input{width:16px;height:16px;accent-color:var(--roxo);margin:0}
+  #bf2 .chk input{width:18px;height:18px;accent-color:var(--roxo);margin:0}
+  /* lista de serviços do Relatório: caixinhas e letras maiores, linhas mais altas e a lista ocupando mais da tela */
+  #bf2 .rlista{max-height:min(46vh,460px);min-height:200px;overflow:auto;border:1px solid var(--line);border-radius:10px;padding:6px;display:grid;gap:2px;align-content:start}
+  #bf2 .rlista label{display:flex;gap:10px;align-items:center;color:var(--ink);font-size:14px;padding:6px 8px;border-radius:7px;cursor:pointer}
+  #bf2 .rlista label:hover{background:var(--roxoSoft)}
+  #bf2 .rlista label span{color:var(--muted)}
+  #bf2 .rlista input{width:20px;height:20px;flex:none;margin:0;accent-color:var(--roxo);cursor:pointer}
+  #bf2 input[type=checkbox],#bf2 input[type=radio]{accent-color:var(--roxo);min-width:16px;min-height:16px}
   #bf2 .grid{user-select:none;display:grid;grid-template-columns:34px repeat(4,minmax(0,1fr)) minmax(0,.85fr) repeat(4,minmax(0,1fr));gap:3px}
   #bf2 .c{position:relative;border:0;border-radius:5px;min-height:28px;font:600 11px ui-monospace,Consolas,monospace;cursor:pointer;background:#e6eaf1;color:var(--ink);padding:0;min-width:0}
   #bf2 .c.fin{background:#2f9a5a;color:#fff}#bf2 .c.ini{background:#e3a21a;color:#2b1d00}#bf2 .c.nao{background:#d2463c;color:#fff}
@@ -627,7 +641,7 @@
   #bf2 .outros{display:flex;flex-wrap:wrap;gap:4px}#bf2 .outros .c{padding:4px 8px;font:600 11px system-ui,sans-serif}
   #bf2 .leg{display:flex;flex-wrap:wrap;gap:4px 12px;font-size:11px;color:var(--muted)}
   #bf2 .leg i{display:inline-block;width:11px;height:11px;border-radius:3px;margin-right:4px;vertical-align:-1px}
-  #bf2 table{border-collapse:collapse;width:100%;font-size:12px}
+  #bf2 table{border-collapse:collapse;width:100%;font-size:13px}
   #bf2 th{background:var(--nav);color:#fff;font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.04em}
   #bf2 td,#bf2 th{border:1px solid var(--line);padding:5px 7px;text-align:left;vertical-align:top}
   #bf2 tr.ok td{background:#eaf7ee}#bf2 tr.pend td{background:#fdeef0}
@@ -676,13 +690,27 @@
   // Se a tela se redesenhar no meio do giro, o logo continua de onde estava (--d negativo) em vez de recomeçar.
   let GIRA = 0;
   const girar = (el) => { if (!el) return; el.classList.remove('gira'); void el.offsetWidth; el.classList.add('gira'); };
+  // Abre crescendo a partir do botão e fecha voltando para ele (animações bf2abre/bf2fecha no CSS).
+  function abrePainel() {
+    root.classList.remove('fecha'); root.style.display = 'flex';
+    root.classList.remove('abre'); void root.offsetWidth; root.classList.add('abre');
+    root.addEventListener('animationend', function fim(e) { if (e.target === root) { root.classList.remove('abre'); root.removeEventListener('animationend', fim); } });
+    GIRA = Date.now(); abrir();
+  }
+  function fechaPainel() {
+    if (root.style.display !== 'flex' || root.classList.contains('fecha')) return;
+    root.classList.remove('abre'); root.classList.add('fecha');
+    const termina = () => { if (!root.classList.contains('fecha')) return; root.classList.remove('fecha'); root.style.display = 'none'; girar($('#bf2-btn')); };
+    root.addEventListener('animationend', function fim(e) { if (e.target === root) { root.removeEventListener('animationend', fim); termina(); } });
+    setTimeout(termina, 600); // se o navegador não avisar o fim da animação, fecha mesmo assim
+  }
   function montar() {
     if ($('#bf2-btn')) return;
     const st = document.createElement('style'); st.textContent = CSS; document.head.appendChild(st);
     const b = document.createElement('button'); b.id = 'bf2-btn'; b.textContent = 'Prisma';
     root = document.createElement('div'); root.id = 'bf2';
     document.body.append(b, root);
-    b.onclick = () => { const abre = root.style.display !== 'flex'; root.style.display = abre ? 'flex' : 'none'; if (abre) { GIRA = Date.now(); abrir(); } else girar(b); };
+    b.onclick = () => { if (root.style.display !== 'flex') abrePainel(); else fechaPainel(); };
   }
 
   async function abrir() {
@@ -740,7 +768,7 @@
       <div class="foot"><span class="msg" id="bf2-status">${esc(STATUS)}</span><span class="assin">Prisma v${VERSAO}${CANAL === 'teste' ? ' (TESTE)' : ''} · criado por João Pedro Ramos</span></div>`;
     root.querySelectorAll('[data-aba]').forEach((b) => b.onclick = () => { if (!configurado() && b.dataset.aba !== 'cfg') return status('Termine a configuração inicial primeiro.'); S.aba = b.dataset.aba; salvarTela(); render(); });
     if (!configurado()) S.aba = 'cfg';
-    $('#bf2-x').onclick = () => { root.style.display = 'none'; girar($('#bf2-btn')); };
+    $('#bf2-x').onclick = fechaPainel;
     ({ mapa: renderMapa, fila: renderFila, rel: renderRel, hist: renderHist, colar: renderColar, gab: renderGab, cfg: renderCfg })[S.aba]();
   }
 
@@ -1042,7 +1070,7 @@
     const body = $('#bf2-body');
     body.innerHTML = `<div class="card topo"><h4>Colar roteiro</h4>
       <div class="nota">Para listas prontas no formato de roteiro (como os Roteiros 1 a 5 que o Claude gera). A planilha da qualidade ainda não entra aqui direto: mande ela para o Claude, que ele devolve o roteiro pronto para colar.</div>
-      <textarea id="c-txt" placeholder="ID	Área no SGQ	FVS	Situação hoje	O que fazer	Itens a marcar	Status final	Ocorrências	Feito"></textarea>
+      <textarea id="c-txt" style="min-height:max(240px,45vh)" placeholder="ID	Área no SGQ	FVS	Situação hoje	O que fazer	Itens a marcar	Status final	Ocorrências	Feito"></textarea>
       <div class="row"><label style="max-width:200px">Abrir em<input type="date" id="c-dA" value="${esc(S.dAbrir)}" max="${hojeStr()}"></label><label style="max-width:200px">Fechar em<input type="date" id="c-dF" value="${esc(S.dFechar)}" max="${hojeStr()}"></label>
         <button class="b p" id="c-ok">Mandar para a fila</button></div></div>`;
     $('#c-ok').onclick = () => {
@@ -1094,7 +1122,7 @@
     const cod = S.gabCod || '';
     const g = cod ? (GAB_USER[cod] || GABP()[cod]) : null;
     const resumo = (gg) => { if (!gg) return 'ainda sem gabarito'; const naT = CFG.torres.map((t) => { const v = Array.isArray(gg.na) ? gg.na : (gg.na && gg.na[t.nome]) || []; return `${t.nome}: ${v.length ? 'NA ' + v.join(', ') : 'tudo A'}`; }).join(' · '); return naT + (gg.naHall ? ` · hall: NA ${gg.naHall.join(', ') || 'nenhum'}` : '') + (gg.pre ? ` · abrir: itens 1 a ${gg.pre}` : ' · sem pré-requisitos'); };
-    body.innerHTML = `<div class="card topo" style="max-width:1000px"><h4>Gabaritos</h4>
+    body.innerHTML = `<div class="card topo" style="max-width:1200px"><h4>Gabaritos</h4>
       <div class="nota">O gabarito diz quais itens vão como <b>NA</b> (não se aplica) e quais vão como <b>A</b>, e até qual item são os pré-requisitos marcados quando a ficha é <b>aberta</b>. Cada pessoa e cada obra pode ter o seu.</div>
       <label>Serviço<select id="g-cod"><option value="">Escolha um serviço…</option>${cods.map((c) => `<option value="${esc(c)}" ${c === cod ? 'selected' : ''}>${esc(c)} · ${esc(nomeLimpo(c))}${GAB_USER[c] ? ' (seu)' : GABP()[c] ? ' (padrão)' : ''}</option>`).join('')}</select></label>
       ${cod ? `<div class="muted"><b>Atual:</b> ${esc(resumo(g))}</div>
@@ -1270,9 +1298,9 @@ Data do PPC: [data]`;
       <div class="card topo"><h4>Relatório de FVS</h4>
         <div class="row"><label style="max-width:160px">Torre<select id="r-torre"><option value="todas">Todas</option>${CFG.torres.map((t) => `<option ${S.relTorre === t.nome ? 'selected' : ''}>${esc(t.nome)}</option>`).join('')}</select></label>
           <label style="max-width:220px">Mostrar<select id="r-filtro"><option value="todas">Todas as situações</option><option value="pend" ${S.relFiltro === 'pend' ? 'selected' : ''}>Só as não finalizadas</option></select></label></div>
-        <label>Serviços (<span id="r-nserv">${S.relServ.length}</span> escolhido(s))<input id="r-busca" type="search" placeholder="buscar serviço…" value="${esc(S.relBusca || '')}"></label>
+        <label><span>Serviços (<span id="r-nserv">${S.relServ.length}</span> escolhido(s))</span><input id="r-busca" type="search" placeholder="buscar serviço…" value="${esc(S.relBusca || '')}"></label>
         <div class="row"><button class="b" id="r-todos">Selecionar todos${q ? ' da busca' : ''}</button><button class="b" id="r-limpa">Limpar</button></div>
-        <div style="max-height:220px;overflow:auto;border:1px solid var(--line);border-radius:8px;padding:6px;display:grid;gap:2px">${lista.map((c) => `<label class="row" style="display:flex;gap:8px;color:var(--ink)"><input type="checkbox" data-rs="${esc(c)}" ${S.relServ.includes(c) ? 'checked' : ''} style="width:auto"> <b>${esc(c.replace('FVS ', ''))}</b> ${esc(nomeLimpo(c))}</label>`).join('')}</div>
+        <div class="rlista">${lista.map((c) => `<label><input type="checkbox" data-rs="${esc(c)}" ${S.relServ.includes(c) ? 'checked' : ''}> <b>${esc(c.replace('FVS ', ''))}</b> <span>${esc(nomeLimpo(c))}</span></label>`).join('')}</div>
         <label class="chk"><input type="checkbox" id="r-ler" ${S.relLer !== false ? 'checked' : ''}> Ler as fichas (itens, responsável e datas; mais lento)</label>
         <div class="row"><button class="b p" id="r-gerar" ${S.relServ.length && !LENDO ? '' : 'disabled'}>Gerar relatório</button>
           <button class="b n" id="r-painel" ${trava}>Painel rápido de todos os serviços</button>
@@ -1280,7 +1308,7 @@ Data do PPC: [data]`;
         <div class="muted">O painel rápido não abre as fichas: conta pelo mapa quantas FVS de cada serviço estão sem iniciar, iniciadas e encerradas, e sai na hora.</div></div>
       <div class="card topo"><h4>Conferência do PPC</h4>
         <div class="nota">Uma linha por serviço, do jeito que está na lona. Ex.: <b>regularização 3Q 1401, 2 e 3</b> · <b>reboco 2Q 1701 a 1708</b> · <b>forro 3Q hall 12</b>.<br>Tem foto da lona? Clique em <b>Copiar pedido para o Claude</b>, cole numa conversa com o Claude, anexe as fotos e cole aqui a lista que ele devolver. Depois é só <b>Conferir no SGQ</b> e baixar a planilha (ela vem com a aba PPC).</div>
-        <textarea id="r-ppc" placeholder="regularização 3Q 1401, 2 e 3&#10;shaft 3Q final 10&#10;louças 2Q 1501 a 1504">${esc(S.relPpc || '')}</textarea>
+        <textarea id="r-ppc" style="min-height:min(34vh,320px);font-size:13px" placeholder="regularização 3Q 1401, 2 e 3&#10;shaft 3Q final 10&#10;louças 2Q 1501 a 1504">${esc(S.relPpc || '')}</textarea>
         <div class="row"><label style="max-width:200px">Data do PPC<input type="date" id="r-dppc" value="${esc(S.relDppc || hojeStr())}"></label><button class="b" id="r-prompt">Copiar pedido para o Claude</button><button class="b p" id="r-ppc-ok" ${trava}>Conferir no SGQ</button></div></div>
     </div>
     <div class="card" style="margin-top:14px" id="r-out">${REL ? previewRel() : '<div class="muted">O relatório aparece aqui, com o painel por serviço. Depois você baixa a planilha no modelo do Controle de FVS (Registro, Dashboard e Categorias).</div>'}</div>`;
@@ -1333,7 +1361,7 @@ Data do PPC: [data]`;
       <div class="row">${dias.slice(0, 7).map((d) => `<button class="b ${d === S.hDia ? 'n' : ''}" data-hd="${d}">${d === hojeStr() ? 'Hoje' : fmt(d)}</button>`).join('')}</div>
       <div class="row">${Object.keys(cont).length ? Object.entries(cont).map(([e, n]) => `<span class="hchip" style="border-left:4px solid ${COR_EV[e] || '#8a94a6'}"><b>${n}</b> ${esc(e)}</span>`).join('') : '<span class="muted">Nada registrado nesse dia.</span>'}</div>
       ${L.length ? `<div class="row"><button class="b" id="h-copiar">Copiar para o Excel</button><button class="b w" id="h-limpar">Apagar o histórico deste dia</button></div>
-      <div style="overflow:auto;max-height:52vh"><table><tr><th>Hora</th><th>Local</th><th>FVS</th><th>O que aconteceu</th><th>Por</th><th>Detalhe</th></tr>
+      <div style="overflow:auto;max-height:62vh"><table><tr><th>Hora</th><th>Local</th><th>FVS</th><th>O que aconteceu</th><th>Por</th><th>Detalhe</th></tr>
         ${L.map((h) => { const e = eventoDe(h); return `<tr><td>${horaLocal(h.q)}</td><td>${esc(localComTorre(h.a))}</td><td><b>${esc(h.f.replace('FVS ', ''))}</b> <span class="muted">${esc(nomeLimpo(h.f))}</span></td><td style="color:${COR_EV[e] || 'inherit'};font-weight:700">${esc(e)}</td><td class="muted">${h.src === 'prisma' ? 'Prisma (' + esc((h.u || '').split(' ')[0]) + ')' : 'visto no SGQ'}</td><td class="muted">${esc(h.d || '')}</td></tr>`; }).join('')}</table></div>` : ''}
     </div>`;
     $('#h-dia').onchange = (e) => { S.hDia = e.target.value || hojeStr(); S.hServ = ''; renderHist(); };
