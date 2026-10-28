@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Prisma - FVS no SGQ
 // @namespace    realiza-bot-fvs
-// @version      2.21
+// @version      2.22
 // @author       João Pedro Ramos
 // @description  Prisma: mapa das torres, fila de comandos, relatórios e preenchimento de FVS no SGQ da Realiza, com travas de segurança. Usa o login do próprio usuário no SGQ.
 // @match        https://gdol.sgq2.com.br/*
@@ -17,7 +17,7 @@
 
   // ============================== CONFIGURAÇÃO PADRÃO ==============================
   // Tudo aqui pode ser trocado pela aba "Configuração" do painel (fica salvo no navegador).
-  const VERSAO = '2.21';
+  const VERSAO = '2.22';
   const CANAL = 'teste'; // 'oficial' ou 'teste' (o arquivo prisma-teste.user.js usa 'teste')
   const PADRAO = {
     obraNome: '', idObra: null,
@@ -202,13 +202,13 @@
     const antes = MAPA.areas[a.nome];
     if (antes && antes.fvs) { // compara com a leitura anterior e registra o que mudou no SGQ
       const agora = new Date().toISOString(), recente = (cod) => HIST.some((x) => x.src === 'prisma' && x.a === a.nome && x.f === cod && Date.now() - new Date(x.q) < 15 * 60000);
+      let novos = 0;
       for (const [cod, e] of Object.entries(fvs)) {
         const o = antes.fvs[cod]; let ev = null;
         if (!o) ev = 'nova'; else if (o[1] !== 1 && e[1] === 1) ev = 'finalizada'; else if (o[1] === 1 && e[1] !== 1) ev = 'reaberta'; else if (!(o[2] > 0) && e[2] > 0) ev = 'iniciada'; else if (o[2] > 0 && !(e[2] > 0) && e[1] !== 1) ev = 'zerada';
-        if (ev && !recente(cod)) HIST.push({ q: agora, a: a.nome, f: cod, ev, src: 'sgq' });
+        if (ev && !recente(cod)) { HIST.push({ q: agora, a: a.nome, f: cod, ev, src: 'sgq' }); novos++; }
       }
-      if (HIST.length > 6000) HIST = HIST.slice(-6000);
-      salvarHist();
+      if (novos) salvarHist();
     }
     MAPA.areas[a.nome] = { id: a.id, fvs };
   }
@@ -552,7 +552,17 @@
   }, LS.get(K('tela'), {}), { sel: [] });
   let FILA = LS.get(K('fila'), []);
   let HIST = LS.get(K('hist'), []);
-  const salvarHist = () => LS.set(K('hist'), HIST);
+  // Histórico: guarda os últimos 10 dias. Antes era um limite de 6000 registros (uma leitura grande do mapa podia empurrar
+  // os dias anteriores para fora) e cada aba do SGQ aberta regravava só a sua lista, apagando o que a outra tinha salvo.
+  // Agora junta com o que já está salvo antes de gravar. substituir=true só quando a pessoa apaga um dia de propósito.
+  const DIAS_HIST = 10;
+  const chaveHist = (h) => [h.q, h.a, h.f, h.ev || h.ac || '', h.src].join('|');
+  function salvarHist(substituir) {
+    const corte = Date.now() - DIAS_HIST * 864e5, M = new Map();
+    for (const h of (substituir ? [] : LS.get(K('hist'), [])).concat(HIST)) if (h && h.q && new Date(h.q).getTime() >= corte) M.set(chaveHist(h), h);
+    HIST = [...M.values()].sort((a, b) => a.q.localeCompare(b.q));
+    LS.set(K('hist'), HIST);
+  }
   let ARR = null; // arrasto de seleção no mapa
   document.addEventListener('mouseup', () => { if (ARR) { ARR = null; if (S.aba === 'mapa') renderMapa(); } });
   let PLANOS = LS.get(K('planos'), {});
@@ -837,6 +847,12 @@
     on('#m-ass', 'onchange', (e) => { S.assumir = e.target.checked; salvarTela(); });
     on('#m-limpa', 'onclick', () => { S.sel = []; renderMapa(); });
     on('#m-tudo', 'onclick', () => fecharTudo([S.detalhe], 'm-tudo-out'));
+    on('#m-reler', 'onclick', async () => {
+      if (ocupado()) return; const n = S.detalhe; status('Lendo ' + localComTorre(n) + ' no SGQ...');
+      try { await atualizarArea(n); salvarMapa(); const tem = !!(MAPA.areas[n] && MAPA.areas[n].fvs[S.serv]);
+        status(tem ? `${S.serv} apareceu em ${localComTorre(n)}: já dá para selecionar.` : `O SGQ continua sem ${S.serv} em ${localComTorre(n)}: ela não está cadastrada neste local.`); } catch (e) { status('Erro: ' + e.message); }
+      renderMapa();
+    });
     on('#m-tudo-sel', 'onclick', () => (S.sel.length ? fecharTudo([...S.sel], 'm-tudo-sel-out') : status('Selecione os locais no mapa primeiro (clique ou arraste por cima).')));
     const selPor = (cls) => { est.todas.forEach((n) => { if (statusCel(n, S.serv) === cls && !S.sel.includes(n)) S.sel.push(n); }); renderMapa(); };
     on('#m-selini', 'onclick', () => selPor('ini'));
@@ -887,7 +903,9 @@
     const st = (e) => e[1] === 1 ? 'fin' : e[2] > 0 ? 'ini' : 'nao';
     const T = torreDe(n), semGab = (c) => !gabarito(c, T && T.nome, ehHall(n));
     const nf = L.filter(([, e]) => e[1] !== 1);
-    return `<h4>${esc(n)}</h4><div class="lst">${L.map(([c, e]) => `<div class="${c === S.serv ? 'hl' : ''}"><b>${esc(c.replace('FVS ', ''))}</b><span class="d">${esc(nomeLimpo(c))}${e[1] !== 1 && semGab(c) ? ' · <i style="color:var(--verm)">sem gabarito</i>' : ''}</span><span class="chip ${st(e)}">${({ fin: 'final.', ini: 'inic.', nao: 'não inic.' })[st(e)]}${e[1] !== 1 && (e[3] || e[4]) ? ' · R/X' : ''}</span></div>`).join('')}</div>
+    // Local hachurado para o serviço escolhido: explica o porquê e deixa ler só este local de novo (o mapa guarda a última leitura).
+    const semEsta = !a.fvs[S.serv] ? `<div class="warn"><b>${esc(S.serv)} não aparece neste local no SGQ</b>, por isso fica hachurado e não dá para selecionar. Se ela foi cadastrada aqui depois da última leitura, clique em <b>Ler este local de novo</b>. Se continuar hachurado, a FVS não está cadastrada neste local: o cadastro é feito no SGQ (checklist da obra), e o Prisma só abre e fecha fichas de FVS já cadastradas.<div class="row" style="margin-top:6px"><button class="b" id="m-reler">Ler este local de novo</button></div></div>` : '';
+    return `<h4>${esc(n)}</h4>${semEsta}<div class="lst">${L.map(([c, e]) => `<div class="${c === S.serv ? 'hl' : ''}"><b>${esc(c.replace('FVS ', ''))}</b><span class="d">${esc(nomeLimpo(c))}${e[1] !== 1 && semGab(c) ? ' · <i style="color:var(--verm)">sem gabarito</i>' : ''}</span><span class="chip ${st(e)}">${({ fin: 'final.', ini: 'inic.', nao: 'não inic.' })[st(e)]}${e[1] !== 1 && (e[3] || e[4]) ? ' · R/X' : ''}</span></div>`).join('')}</div>
       ${nf.length ? `<button class="b p full" id="m-tudo">Fechar todas as ${nf.length} FVS não finalizadas deste local</button><div id="m-tudo-out"></div>` : '<div class="muted">Todas as FVS deste local já estão finalizadas.</div>'}`;
   }
   // "Fechar tudo": todas as FVS não finalizadas dos locais vão para a fila como FECHAR, cada uma com o seu gabarito,
@@ -1050,7 +1068,7 @@
       let r; try { r = await executarTarefa(t, simular); } catch (e) { r = PEND('erro: ' + e.message); if (/Sessão expirada/.test(e.message)) PARAR = true; }
       if (r.resultado === 'PENDENTE' && /funcion[aá]rio vinculado/i.test(r.msg || '')) { PARAR = true; r.msg += ' · Seu login do SGQ está sem funcionário vinculado: o próprio SGQ recusa qualquer gravação, até pela tela. Fila parada para não repetir o erro em todas as fichas. Peça para a TI/administrador do SGQ vincular seu usuário ao seu cadastro de funcionário e rode de novo.'; status('Fila parada: seu login do SGQ está sem funcionário vinculado. Fale com a TI e rode de novo depois.'); }
       RESULT.push({ area: t.area, fvs: t.fvs, acao: t.acao, ...r, quando: new Date().toLocaleString('pt-BR'), simulacao: simular });
-      if (!simular) { HIST.push({ q: new Date().toISOString(), a: t.area, f: t.fvs, ac: t.acao, r: r.resultado, d: r.msg, src: 'prisma', u: CFG.nomeInspecionado }); if (HIST.length > 6000) HIST = HIST.slice(-6000); salvarHist(); }
+      if (!simular) { HIST.push({ q: new Date().toISOString(), a: t.area, f: t.fvs, ac: t.acao, r: r.resultado, d: r.msg, src: 'prisma', u: CFG.nomeInspecionado }); salvarHist(); }
       if (!simular && r.resultado === 'OK') { feitos.add(t.area); const g = FILA.find((x) => x.id === t.grupo); if (g) { g.areas = g.areas.filter((a) => a !== t.area); g.oc = (g.oc || []).filter((o) => o.area !== t.area); } }
       const fr = $('#f-res'); if (fr) fr.innerHTML = tabelaRes(RESULT);
     }
@@ -1124,7 +1142,7 @@
     const resumo = (gg) => { if (!gg) return 'ainda sem gabarito'; const naT = CFG.torres.map((t) => { const v = Array.isArray(gg.na) ? gg.na : (gg.na && gg.na[t.nome]) || []; return `${t.nome}: ${v.length ? 'NA ' + v.join(', ') : 'tudo A'}`; }).join(' · '); return naT + (gg.naHall ? ` · hall: NA ${gg.naHall.join(', ') || 'nenhum'}` : '') + (gg.pre ? ` · abrir: itens 1 a ${gg.pre}` : ' · sem pré-requisitos'); };
     body.innerHTML = `<div class="card topo" style="max-width:1200px"><h4>Gabaritos</h4>
       <div class="nota">O gabarito diz quais itens vão como <b>NA</b> (não se aplica) e quais vão como <b>A</b>, e até qual item são os pré-requisitos marcados quando a ficha é <b>aberta</b>. Cada pessoa e cada obra pode ter o seu.</div>
-      <label>Serviço<select id="g-cod"><option value="">Escolha um serviço…</option>${cods.map((c) => `<option value="${esc(c)}" ${c === cod ? 'selected' : ''}>${esc(c)} · ${esc(nomeLimpo(c))}${GAB_USER[c] ? ' (seu)' : GABP()[c] ? ' (padrão)' : ''}</option>`).join('')}</select></label>
+      <label>Serviço<input id="g-busca" type="search" placeholder="buscar: chapisco, reboco, 021…" value="${esc(S.gabBusca || '')}"><select id="g-cod"><option value="">${S.gabBusca ? 'Resultado da busca…' : 'Escolha um serviço…'}</option>${cods.filter((c) => { const q = semAc(S.gabBusca || '').trim(); return !q || c === cod || semAc(c + ' ' + nomeLimpo(c)).includes(q) || semAc(c.replace(/FVS|\s/g, '')).includes(q.replace(/\s/g, '')); }).map((c) => `<option value="${esc(c)}" ${c === cod ? 'selected' : ''}>${esc(c)} · ${esc(nomeLimpo(c))}${GAB_USER[c] ? ' (seu)' : GABP()[c] ? ' (padrão)' : ''}</option>`).join('')}</select></label>
       ${cod ? `<div class="muted"><b>Atual:</b> ${esc(resumo(g))}</div>
       <div class="row"><button class="b p" id="g-ficha">Montar na ficha</button>
         ${CFG.torres.length > 3
@@ -1133,6 +1151,13 @@
         ${GAB_USER[cod] ? '<button class="b w" id="g-pad">Apagar o meu gabarito deste serviço</button>' : ''}</div>
       <div id="g-out" class="muted"></div><div id="g-ed"></div>` : '<div class="muted">Nada é lido do SGQ até você escolher um serviço.</div>'}</div>`;
     $('#g-cod').onchange = (e) => { S.gabCod = e.target.value; ED = null; salvarTela(); renderGab(); };
+    // busca de serviço: filtra a lista; se sobrar um só, já escolhe ele
+    $('#g-busca').oninput = (e) => {
+      S.gabBusca = e.target.value; const q = semAc(S.gabBusca).trim();
+      const ach = q ? cods.filter((c) => semAc(c + ' ' + nomeLimpo(c)).includes(q) || semAc(c.replace(/FVS|\s/g, '')).includes(q.replace(/\s/g, ''))) : [];
+      if (ach.length === 1 && ach[0] !== S.gabCod) { S.gabCod = ach[0]; ED = null; }
+      salvarTela(); renderGab(); const i = $('#g-busca'); i.focus(); i.setSelectionRange(i.value.length, i.value.length);
+    };
     if (!cod) return;
     const bp = $('#g-pad'); if (bp) bp.onclick = () => { if (confirm('Apagar o seu gabarito de ' + cod + '?')) { delete GAB_USER[cod]; LS.set(K('gab'), GAB_USER); ED = null; renderGab(); } };
     $('#g-ficha').onclick = async () => {
@@ -1260,27 +1285,6 @@
     return { ...base, sit, itens: `${totalPreenchido(ref)}/${ref.totalItens}`, inspetor, abertura: dt(ref.dataAbertura), encerramento: dt(ref.dataEncerramento), rx: (ref.totalR || 0) + (ref.totalX || 0) > 0 };
   }
   let REL = null; // { titulo, subtitulo, linhas, tipo }
-  // Pedido pronto para o Claude ler as fotos da lona do PPC (o Prisma não lê foto: quem lê é o Claude, e a lista volta para cá).
-  const PROMPT_PPC = `Você vai ler fotos da lona do PPC (programação semanal de produção) de uma obra da Realiza Construtora e transformar o que está escrito em uma lista para o Prisma, um sistema que confere as fichas de verificação de serviço (FVS).
-
-O que fazer:
-1. Leia todas as fotos que eu enviar. A lona tem, para cada serviço, a torre (ex.: 2Q, 3Q) e os apartamentos ou halls onde ele foi programado ou executado.
-2. Devolva UMA linha por serviço e por torre, sempre neste formato:
-   serviço torre locais
-   Exemplos:
-   regularização 3Q 1401, 1402, 1403
-   reboco 2Q 1701 a 1708
-   forro 3Q hall 12
-   shaft 3Q final 10
-3. Regras para os locais:
-   - Apartamento sempre com 3 ou 4 dígitos (101, 1401). Se a lona abreviar ("1401, 2 e 3"), escreva por extenso: 1401, 1402, 1403.
-   - Sequência contínua no mesmo andar pode ir como faixa: 1501 a 1508.
-   - Hall ou pavimento: "hall" + número do pavimento (hall 12).
-4. Use nomes simples de serviço: reboco, reboco externo, gesso, forro, shaft, regularização, revestimento, rejunte, bancada, balcão, louças, metais, tanque, porta de madeira, porta de alumínio, janela, contramarco, peitoril, BIT, impermeabilização, pintura, textura, corrimão, guarda-corpo, chapisco, alvenaria, fiação, hidráulica, sanitária, gás. Serviços que não têm FVS (limpeza, entulho, transporte etc.) também podem ir: o Prisma separa sozinho.
-5. Não invente nada. Se uma palavra ou número estiver ilegível, não chute: liste esses casos no final, numa seção "Não consegui ler", dizendo em qual foto e o que parece estar escrito.
-6. Responda só com a lista, dentro de um bloco de código, para eu copiar e colar direto no Prisma. A seção "Não consegui ler" vem depois do bloco, se houver.
-
-Data do PPC: [data]`;
   // Relatório, painel e PPC leem o SGQ um de cada vez; enquanto isso o botão Parar da aba fica ativo.
   async function lendo(fn) {
     if (ocupado()) return;
@@ -1307,9 +1311,9 @@ Data do PPC: [data]`;
           <button class="b w" id="r-stop" ${LENDO ? '' : 'disabled'}>Parar</button></div>
         <div class="muted">O painel rápido não abre as fichas: conta pelo mapa quantas FVS de cada serviço estão sem iniciar, iniciadas e encerradas, e sai na hora.</div></div>
       <div class="card topo"><h4>Conferência do PPC</h4>
-        <div class="nota">Uma linha por serviço, do jeito que está na lona. Ex.: <b>regularização 3Q 1401, 2 e 3</b> · <b>reboco 2Q 1701 a 1708</b> · <b>forro 3Q hall 12</b>.<br>Tem foto da lona? Clique em <b>Copiar pedido para o Claude</b>, cole numa conversa com o Claude, anexe as fotos e cole aqui a lista que ele devolver. Depois é só <b>Conferir no SGQ</b> e baixar a planilha (ela vem com a aba PPC).</div>
+        <div class="nota">Uma linha por serviço, do jeito que está na lona. Ex.: <b>regularização 3Q 1401, 2 e 3</b> · <b>reboco 2Q 1701 a 1708</b> · <b>forro 3Q hall 12</b>.<br>Depois é só <b>Conferir no SGQ</b> e baixar a planilha (ela vem com a aba PPC).</div>
         <textarea id="r-ppc" style="min-height:min(34vh,320px);font-size:13px" placeholder="regularização 3Q 1401, 2 e 3&#10;shaft 3Q final 10&#10;louças 2Q 1501 a 1504">${esc(S.relPpc || '')}</textarea>
-        <div class="row"><label style="max-width:200px">Data do PPC<input type="date" id="r-dppc" value="${esc(S.relDppc || hojeStr())}"></label><button class="b" id="r-prompt">Copiar pedido para o Claude</button><button class="b p" id="r-ppc-ok" ${trava}>Conferir no SGQ</button></div></div>
+        <div class="row"><label style="max-width:200px">Data do PPC<input type="date" id="r-dppc" value="${esc(S.relDppc || hojeStr())}"></label><button class="b p" id="r-ppc-ok" ${trava}>Conferir no SGQ</button></div></div>
     </div>
     <div class="card" style="margin-top:14px" id="r-out">${REL ? previewRel() : '<div class="muted">O relatório aparece aqui, com o painel por serviço. Depois você baixa a planilha no modelo do Controle de FVS (Registro, Dashboard e Categorias).</div>'}</div>`;
     $('#r-torre').onchange = (e) => { S.relTorre = e.target.value; salvarTela(); };
@@ -1327,10 +1331,6 @@ Data do PPC: [data]`;
     $('#r-painel').onclick = () => lendo(() => gerarRelatorio({ todos: true }));
     $('#r-stop').onclick = () => { if (!LENDO) return; PARAR = true; status('Parando a leitura...'); };
     $('#r-ppc-ok').onclick = () => { S.relPpc = $('#r-ppc').value; salvarTela(); lendo(() => conferirPpc()); };
-    $('#r-prompt').onclick = async () => {
-      const t = PROMPT_PPC.replace('[data]', fmt(S.relDppc || hojeStr()));
-      try { await navigator.clipboard.writeText(t); status('Pedido copiado. Abra o Claude, cole (Ctrl + V), anexe as fotos da lona e envie. Depois cole aqui a lista que ele devolver.'); } catch (e) { status('Não deu para copiar sozinho.'); }
-    };
     ligarBotoesRel();
   }
   // ------------------------------ aba HISTÓRICO ------------------------------
@@ -1346,19 +1346,20 @@ Data do PPC: [data]`;
   const COR_EV = { 'Aberta': '#e3a21a', 'Iniciada': '#e3a21a', 'Fechada e finalizada': '#2f9a5a', 'Finalizada': '#2f9a5a', 'Fechada': '#2f9a5a', 'Pendente': '#d2463c', 'Voltou a ficar aberta': '#d2463c', 'Itens apagados': '#d2463c' };
   function renderHist() {
     const body = $('#bf2-body');
+    salvarHist(); // traz o que outra aba do SGQ tenha gravado e tira o que passou de 10 dias
     S.hDia = S.hDia || hojeStr(); S.hSrc = S.hSrc || 'todos';
     const dias = [...new Set(HIST.map((h) => dataLocal(h.q)))].sort().reverse();
     const L = HIST.filter((h) => dataLocal(h.q) === S.hDia && (S.hSrc === 'todos' || h.src === S.hSrc) && (!S.hServ || h.f === S.hServ)).sort((a, b) => b.q.localeCompare(a.q));
     const cont = {}; L.forEach((h) => { const e = eventoDe(h); cont[e] = (cont[e] || 0) + 1; });
     const servs = [...new Set(HIST.filter((h) => dataLocal(h.q) === S.hDia).map((h) => h.f))].sort((a, b) => a.localeCompare(b, 'pt', { numeric: true }));
     body.innerHTML = `<div class="card topo"><h4>Histórico do dia</h4>
-      <div class="nota">O que o <b>Prisma gravou</b> e o que <b>mudou no SGQ</b> (visto ao atualizar o mapa: inclui o que foi feito na mão ou por outras pessoas; a hora é a da leitura, não a do lançamento). Fica guardado neste navegador.</div>
+      <div class="nota">O que o <b>Prisma gravou</b> e o que <b>mudou no SGQ</b> (visto ao atualizar o mapa: inclui o que foi feito na mão ou por outras pessoas; a hora é a da leitura, não a do lançamento). Fica guardado neste navegador pelos últimos ${DIAS_HIST} dias.</div>
       <div class="row">
         <label style="max-width:170px">Dia<input type="date" id="h-dia" value="${esc(S.hDia)}" max="${hojeStr()}"></label>
         <label style="max-width:200px">Mostrar<select id="h-src"><option value="todos">Tudo</option><option value="prisma" ${S.hSrc === 'prisma' ? 'selected' : ''}>Só o que o Prisma gravou</option><option value="sgq" ${S.hSrc === 'sgq' ? 'selected' : ''}>Só mudanças vistas no SGQ</option></select></label>
         <label style="max-width:260px">Serviço<select id="h-serv"><option value="">Todos</option>${servs.map((c) => `<option value="${esc(c)}" ${S.hServ === c ? 'selected' : ''}>${esc(c)} · ${esc(nomeLimpo(c))}</option>`).join('')}</select></label>
       </div>
-      <div class="row">${dias.slice(0, 7).map((d) => `<button class="b ${d === S.hDia ? 'n' : ''}" data-hd="${d}">${d === hojeStr() ? 'Hoje' : fmt(d)}</button>`).join('')}</div>
+      <div class="row">${dias.slice(0, DIAS_HIST).map((d) => `<button class="b ${d === S.hDia ? 'n' : ''}" data-hd="${d}">${d === hojeStr() ? 'Hoje' : fmt(d)}</button>`).join('')}</div>
       <div class="row">${Object.keys(cont).length ? Object.entries(cont).map(([e, n]) => `<span class="hchip" style="border-left:4px solid ${COR_EV[e] || '#8a94a6'}"><b>${n}</b> ${esc(e)}</span>`).join('') : '<span class="muted">Nada registrado nesse dia.</span>'}</div>
       ${L.length ? `<div class="row"><button class="b" id="h-copiar">Copiar para o Excel</button><button class="b w" id="h-limpar">Apagar o histórico deste dia</button></div>
       <div style="overflow:auto;max-height:62vh"><table><tr><th>Hora</th><th>Local</th><th>FVS</th><th>O que aconteceu</th><th>Por</th><th>Detalhe</th></tr>
@@ -1371,7 +1372,7 @@ Data do PPC: [data]`;
     const cp = $('#h-copiar'); if (cp) cp.onclick = async () => {
       const tsv = ['Dia\tHora\tTorre\tLocal\tFVS\tServiço\tO que aconteceu\tPor\tDetalhe', ...L.map((h) => [fmt(dataLocal(h.q)), horaLocal(h.q), (torreDe(h.a) || {}).nome || '', localCurto(h.a), h.f, nomeLimpo(h.f), eventoDe(h), h.src === 'prisma' ? 'Prisma (' + (h.u || '') + ')' : 'visto no SGQ', (h.d || '').replace(/\s+/g, ' ')].join('\t'))].join('\n');
       try { await navigator.clipboard.writeText(tsv); status(L.length + ' linha(s) copiadas. Cole no Excel com Ctrl + V.'); } catch (e) { status('Não deu para copiar sozinho.'); } };
-    const lp = $('#h-limpar'); if (lp) lp.onclick = () => { if (!confirm('Apagar o histórico de ' + fmt(S.hDia) + ' deste navegador? (Não mexe em nada no SGQ.)')) return; HIST = HIST.filter((h) => dataLocal(h.q) !== S.hDia); salvarHist(); renderHist(); };
+    const lp = $('#h-limpar'); if (lp) lp.onclick = () => { if (!confirm('Apagar o histórico de ' + fmt(S.hDia) + ' deste navegador? (Não mexe em nada no SGQ.)')) return; salvarHist(); HIST = HIST.filter((h) => dataLocal(h.q) !== S.hDia); salvarHist(true); renderHist(); };
   }
   async function garantirMapa(torres) {
     await listarAreas(); if (!Object.keys(NOMES).length) await carregarNomes();
