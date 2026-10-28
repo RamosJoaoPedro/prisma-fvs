@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Prisma - FVS no SGQ
 // @namespace    realiza-bot-fvs
-// @version      2.22
+// @version      2.23
 // @author       João Pedro Ramos
 // @description  Prisma: mapa das torres, fila de comandos, relatórios e preenchimento de FVS no SGQ da Realiza, com travas de segurança. Usa o login do próprio usuário no SGQ.
 // @match        https://gdol.sgq2.com.br/*
@@ -17,7 +17,7 @@
 
   // ============================== CONFIGURAÇÃO PADRÃO ==============================
   // Tudo aqui pode ser trocado pela aba "Configuração" do painel (fica salvo no navegador).
-  const VERSAO = '2.22';
+  const VERSAO = '2.23';
   const CANAL = 'teste'; // 'oficial' ou 'teste' (o arquivo prisma-teste.user.js usa 'teste')
   const PADRAO = {
     obraNome: '', idObra: null,
@@ -349,6 +349,7 @@
   }
   const OK = (msg) => ({ resultado: 'OK', msg });
   const PEND = (msg) => ({ resultado: 'PENDENTE', msg });
+  const NOME_ACAO = { abrir: 'Abrir', fechar: 'Fechar', excluir: 'Excluir' };
 
   async function salvarFicha(idInspecao, status, itens, dataEncerramento) {
     await sleep(CFG.pausaMs);
@@ -374,6 +375,7 @@
   // t = { area, fvs, acao:'abrir'|'fechar', dAbrir, dFechar, na?, pre?, opc:{assumir, segunda, tratativa} }
   async function executarTarefa(t, simular) {
     if (!configurado()) return PEND('Prisma ainda não configurado (aba Configuração)');
+    if (t.acao === 'excluir') return excluirFicha(t, simular);
     const T = torreDe(t.area); const hall = ehHall(t.area);
     const g = t.na ? { na: t.na, pre: t.pre || null } : gabarito(t.fvs, T && T.nome, hall);
     if (!g) return PEND('FVS sem gabarito: defina na aba Gabaritos');
@@ -544,12 +546,50 @@
     if (!dep || dep.status !== 3) return PEND('ocorrência criada, mas confira a ficha na tela (status ' + (dep ? dep.status : '?') + ')');
     return OK(`${assumidaDe ? 'assumida de ' + assumidaDe + '; ' : ''}ocorrência criada no ${txtItens} (item marcado R); ficha iniciada, não encerrada até a tratativa`);
   }
+  // Ação "Excluir" (ficha aberta sem querer): é a mesma lixeira da lista de verificações do SGQ. Por segurança só exclui
+  // ficha ABERTA (não encerrada), sua (ou sem inspetor e em branco) e sem ocorrência; ficha encerrada e FVS finalizada
+  // ficam como estão. Confere todas as fichas abertas do local antes de excluir qualquer uma.
+  async function excluirFicha(t, simular) {
+    const a = (await listarAreas()).find((x) => norm(x.nome) === norm(t.area));
+    if (!a) return PEND('área não encontrada no SGQ');
+    const fv = (await servicosDaArea(a.id)).filter((x) => codNorm(x.codigo) === t.fvs);
+    if (!fv.length) return PEND('FVS não existe nessa área');
+    const nf = fv.filter((x) => x.status !== 1);
+    if (!nf.length) return PEND('a FVS já está finalizada: o SGQ não deixa excluir a ficha dela');
+    if (nf.length > 1) return PEND(`a FVS aparece ${fv.length} vezes na área: conferir na tela do SGQ qual ficha excluir`);
+    const idS = nf[0].idObraChecklistServico;
+    const verifs = await listarVerif(idS);
+    const abertas = verifs.filter((i) => i.status === 0 || i.status === 3);
+    if (!abertas.length) return OK(verifs.length ? 'já não tinha ficha aberta (ficha encerrada não é excluída)' : 'já não tinha ficha');
+    const dt = (s) => s ? new Date(s).toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' }) : '?';
+    const bloq = [], desc = [];
+    for (const v of abertas) {
+      const quando = `a ficha aberta em ${dt(v.dataAbertura)}`;
+      const d = ((await api('GET', '/obras/inspecoes-obra/' + v.idInspecaoObra)).j || {}).item || {};
+      if (d.idFuncionarioInspecionado && d.idFuncionarioInspecionado !== CFG.idInspecionado) { bloq.push(`${quando} é de ${(d.funcionarioInspecionado || '').trim()}`); continue; }
+      if (!d.idFuncionarioInspecionado && totalPreenchido(v) > 0) { bloq.push(`${quando} está sem inspetor e com itens marcados`); continue; }
+      const ocs = ((await api('POST', '/obras/inspecoes-obra/' + v.idInspecaoObra + '/ocorrencias', { page: 1, rowsPerPage: 50 })).j || {}).items || [];
+      if (ocs.length) { bloq.push(`${quando} tem ${ocs.length} ocorrência(s)`); continue; }
+      desc.push(`aberta em ${dt(v.dataAbertura)}, ${Math.min(totalPreenchido(v), v.totalItens)}/${v.totalItens} itens`);
+    }
+    if (bloq.length) return PEND(`não excluí nada: ${bloq.join(' | ')}. Se precisar mesmo, exclua pela tela do SGQ.`);
+    const txt = abertas.length > 1 ? `${abertas.length} fichas (${desc.join('; ')})` : 'a ficha ' + desc[0];
+    if (simular) return OK('SIMULAÇÃO: excluiria ' + txt);
+    for (let k = 0; k < abertas.length; k++) {
+      const r = await api('DELETE', '/obras/inspecoes-obra/' + abertas[k].idInspecaoObra + '/delete');
+      if (r.st < 200 || r.st > 299) return PEND('o SGQ recusou excluir: ' + msgErro(r) + (k ? ` (${k} já excluída(s))` : ''));
+    }
+    const ficou = (await listarVerif(idS)).filter((i) => abertas.some((v) => v.idInspecaoObra === i.idInspecaoObra));
+    if (ficou.length) return PEND('o SGQ respondeu que excluiu, mas a ficha continua lá: conferir na tela');
+    return OK((abertas.length > 1 ? 'excluídas ' : 'excluída ') + txt);
+  }
 
   // ---------------------------------- estado da tela ----------------------------------
   const S = Object.assign({
     aba: 'mapa', torre: (CFG.torres[0] || {}).nome || '', serv: 'FVS 013 A', busca: '', ordem: 'cod', detalhe: '',
     acao: 'fechar', dAbrir: hojeStr(), dFechar: hojeStr(), assumir: false, segunda: false, tratativa: '',
   }, LS.get(K('tela'), {}), { sel: [] });
+  if (S.acao === 'excluir') S.acao = 'fechar'; // reabrir o Prisma nunca começa no modo Excluir
   let FILA = LS.get(K('fila'), []);
   let HIST = LS.get(K('hist'), []);
   // Histórico: guarda os últimos 10 dias. Antes era um limite de 6000 registros (uma leitura grande do mapa podia empurrar
@@ -794,7 +834,8 @@
     const g = gabarito(S.serv, T.nome, false), gh = gabarito(S.serv, T.nome, true);
     const cont = { fin: 0, ini: 0, nao: 0 };
     est.todas.forEach((n) => { const s = statusCel(n, S.serv); if (cont[s] !== undefined) cont[s]++; });
-    const avisoGab = !g ? `<div class="warn">${esc(S.serv)} ainda não tem gabarito. Defina ou aprenda na aba <b>Gabaritos</b> antes de mandar para a fila.</div>`
+    const avisoGab = S.acao === 'excluir' ? `<div class="warn">Exclui a ficha <b>aberta</b> (iniciada, não encerrada) de ${esc(S.serv)} nos locais escolhidos, como a lixeira do SGQ. Só exclui ficha sua e sem ocorrência; ficha encerrada e FVS finalizada não são tocadas. <b>Não tem volta.</b></div>`
+      : !g ?`<div class="warn">${esc(S.serv)} ainda não tem gabarito. Defina ou aprenda na aba <b>Gabaritos</b> antes de mandar para a fila.</div>`
       : (S.acao === 'abrir' && !g.pre ? `<div class="warn">Para <b>abrir</b> ${esc(S.serv)} falta definir até qual item vão os pré-requisitos (aba Gabaritos).</div>` : '');
     body.innerHTML = `<div class="lay">
       <div class="card topo">
@@ -813,14 +854,14 @@
         <button class="b full" id="m-tudo-sel">Fechar todas as FVS não finalizadas da seleção</button><div id="m-tudo-sel-out"></div>
         <div class="muted">${S.sel.length} local(is) selecionado(s). Clique ou arraste por cima dos apartamentos; clique no número do andar ou da coluna para pegar a linha inteira.</div>
         <h4>O que fazer</h4>
-        <span class="seg">${[['abrir', 'Abrir'], ['fechar', 'Fechar']].map(([k, t]) => `<button data-a="${k}" class="${S.acao === k ? 'on' : ''}">${t}</button>`).join('')}</span>
-        <label>Data de abertura (se precisar criar a ficha)<input type="date" id="m-dA" value="${esc(S.dAbrir)}" max="${hojeStr()}"></label>
+        <span class="seg">${Object.entries(NOME_ACAO).map(([k, t]) => `<button data-a="${k}" class="${S.acao === k ? 'on' : ''}">${t}</button>`).join('')}</span>
+        ${S.acao !== 'excluir' ? `<label>Data de abertura (se precisar criar a ficha)<input type="date" id="m-dA" value="${esc(S.dAbrir)}" max="${hojeStr()}"></label>` : ''}
         ${S.acao === 'fechar' ? `<label>Data de fechamento<input type="date" id="m-dF" value="${esc(S.dFechar)}" max="${hojeStr()}"></label>` : ''}
         ${S.acao === 'fechar' ? `<label class="chk"><input type="checkbox" id="m-seg" ${S.segunda ? 'checked' : ''}> Aprovar 2ª inspeção de itens R/X</label>
         ${S.segunda ? `<label>Tratativa (vazio = padrão)<input id="m-trat" value="${esc(S.tratativa)}" placeholder="${esc(CFG.tratativaPadrao)}"></label>` : ''}` : ''}
-        <label class="chk"><input type="checkbox" id="m-ass" ${S.assumir ? 'checked' : ''}> Assumir fichas de: ${CFG.exFuncionarios.length ? esc(CFG.exFuncionarios.map((n) => n.split(/\s+/).slice(0, 2).join(' ')).join(', ')) : '<span class="muted">ninguém (Configuração)</span>'}</label>
+        ${S.acao !== 'excluir' ? `<label class="chk"><input type="checkbox" id="m-ass" ${S.assumir ? 'checked' : ''}> Assumir fichas de: ${CFG.exFuncionarios.length ? esc(CFG.exFuncionarios.map((n) => n.split(/\s+/).slice(0, 2).join(' ')).join(', ')) : '<span class="muted">ninguém (Configuração)</span>'}</label>` : ''}
         ${avisoGab}
-        <button class="b p" id="m-add" ${!S.sel.length || !g || (S.acao === 'abrir' && !g.pre) ? 'disabled' : ''}>Adicionar à fila: ${S.acao === 'abrir' ? 'abrir' : 'fechar'} ${S.sel.length} local(is)</button>
+        <button class="b p" id="m-add" ${!S.sel.length || (S.acao !== 'excluir' && (!g || (S.acao === 'abrir' && !g.pre))) ? 'disabled' : ''}>Adicionar à fila: ${S.acao} ${S.sel.length} local(is)</button>
       </div>
       <div class="card">
         <div class="row" style="justify-content:space-between"><h4>${esc(T.nome)}${norm(T.nome) !== norm(T.bloco) ? ' · ' + esc(T.bloco) : ''} · ${esc(S.serv)}${nomeLimpo(S.serv) !== S.serv ? ' ' + esc(nomeLimpo(S.serv)) : ''}</h4>
@@ -860,7 +901,7 @@
     on('#m-atu', 'onclick', async () => { if (ocupado()) return; PARAR = false; try { await atualizarTorre(T); } catch (e) { status('Erro: ' + e.message); } renderMapa(); });
     on('#m-add', 'onclick', () => {
       if (S.acao === 'fechar' && S.dAbrir > S.dFechar) return status('A data de abertura não pode ser depois da de fechamento.');
-      FILA.push({ id: Date.now(), fvs: S.serv, acao: S.acao, areas: [...S.sel].sort((a, b) => a.localeCompare(b, 'pt', { numeric: true })), dAbrir: S.dAbrir, dFechar: S.acao === 'fechar' ? S.dFechar : S.dAbrir, opc: { assumir: S.assumir, segunda: S.acao === 'fechar' && S.segunda, tratativa: S.segunda ? S.tratativa : '' } });
+      FILA.push({ id: Date.now(), fvs: S.serv, acao: S.acao, areas: [...S.sel].sort((a, b) => a.localeCompare(b, 'pt', { numeric: true })), dAbrir: S.dAbrir, dFechar: S.acao === 'fechar' ? S.dFechar : S.dAbrir, opc: S.acao === 'excluir' ? {} : { assumir: S.assumir, segunda: S.acao === 'fechar' && S.segunda, tratativa: S.segunda ? S.tratativa : '' } });
       salvarFila(); status(`Adicionado à fila: ${S.acao} ${S.sel.length} local(is) de ${S.serv}.`); S.sel = []; render();
     });
     // clicar ou arrastar: o primeiro quadradinho decide se o arrasto marca ou desmarca
@@ -936,7 +977,7 @@
   }
   function resumoFila() {
     if (!FILA.length) return '<div class="muted">Vazia. Selecione locais e clique em "Adicionar à fila".</div>';
-    return `<div class="muted">${FILA.map((g) => `${g.acao === 'abrir' ? 'Abrir' : 'Fechar'} ${esc(g.fvs)}: ${g.areas.length}`).join('<br>')}</div>`;
+    return `<div class="muted">${FILA.map((g) => `${NOME_ACAO[g.acao]} ${esc(g.fvs)}: ${g.areas.length}`).join('<br>')}</div>`;
   }
 
   // ------------------------------ aba FILA ------------------------------
@@ -1003,11 +1044,13 @@
   function renderFila() {
     const body = $('#bf2-body');
     const nomesPlanos = Object.keys(PLANOS).sort();
+    // "Desfazer": fichas que o último resultado abriu de verdade (não as que já estavam abertas nem as assumidas de outra pessoa)
+    const desfaz = RESULT.filter((x) => !x.simulacao && x.acao === 'abrir' && x.resultado === 'OK' && /^iniciada em/.test(x.msg || ''));
     body.innerHTML = `<div class="card topo">
       <h4>Fila de comandos</h4>
       ${FILA.length ? `<table><tr><th>Serviço</th><th>Ação</th><th>Datas</th><th>Locais</th><th>Opções</th><th></th></tr>
-        ${FILA.map((g) => `<tr><td><b>${esc(g.fvs)}</b><br><span class="muted">${esc(nomeLimpo(g.fvs))}</span></td><td>${g.acao === 'abrir' ? 'Abrir' : 'Fechar'}</td>
-          <td>${g.acao === 'abrir' ? 'abre ' + fmt(g.dAbrir) : 'abre ' + fmt(g.dAbrir) + '<br>fecha ' + fmt(g.dFechar)}</td>
+        ${FILA.map((g) => `<tr><td><b>${esc(g.fvs)}</b><br><span class="muted">${esc(nomeLimpo(g.fvs))}</span></td><td${g.acao === 'excluir' ? ' style="color:var(--verm);font-weight:700"' : ''}>${NOME_ACAO[g.acao]}</td>
+          <td>${g.acao === 'excluir' ? 'ficha aberta' : g.acao === 'abrir' ? 'abre ' + fmt(g.dAbrir) : 'abre ' + fmt(g.dAbrir) + '<br>fecha ' + fmt(g.dFechar)}</td>
           <td>${g.areas.map((a) => esc(localComTorre(a))).join(', ')}</td>
           <td class="muted">${[g.opc && g.opc.assumir ? 'assume fichas da lista' : '', g.opc && g.opc.segunda ? '2ª inspeção' + (g.opc.tratativa ? ': "' + esc(g.opc.tratativa) + '"' : '') : '', g.na ? 'gabarito do roteiro' : ''].filter(Boolean).join('<br>')}
             ${(g.oc || []).map((o) => `<div style="color:var(--verm)">ocorrência · ${esc(localCurto(o.area))} · item ${o.item}: "${esc(o.texto.length > 60 ? o.texto.slice(0, 60) + '…' : o.texto)}" <a href="#" data-ocdel="${g.id}|${o.id}" style="color:var(--muted)">tirar</a></div>`).join('')}</td>
@@ -1025,7 +1068,8 @@
         <td class="row"><button class="b" data-pl="${esc(n)}">Carregar igual</button><button class="b" data-plf="${esc(n)}">Carregar como FECHAR</button><button class="b" data-pld="${esc(n)}">Apagar</button></td></tr>`).join('')}</table>
         <label style="max-width:260px">Data de fechamento ao "carregar como FECHAR"<input type="date" id="p-df" value="${esc(S.dFechar)}" max="${hojeStr()}"></label>` : '<div class="muted">Nenhum plano salvo.</div>'}
       <h4>Último resultado</h4>
-      <div class="row"><button class="b" id="r-copia" ${RESULT.length ? '' : 'disabled'}>Copiar resultado (para colar na planilha)</button></div>
+      <div class="row"><button class="b" id="r-copia" ${RESULT.length ? '' : 'disabled'}>Copiar resultado (para colar na planilha)</button>
+        ${desfaz.length ? `<button class="b" id="r-desfaz" ${RODANDO ? 'disabled' : ''} style="border-color:var(--verm);color:var(--verm)">Desfazer: excluir as ${desfaz.length} ficha(s) que este resultado abriu</button>` : ''}</div>
       <div id="f-res">${tabelaRes(RESULT)}</div></div>`;
     body.querySelectorAll('[data-del]').forEach((b) => b.onclick = () => { if (ocupado()) return; FILA = FILA.filter((g) => String(g.id) !== b.dataset.del); salvarFila(); render(); });
     $('#f-limpa').onclick = () => { if (ocupado()) return; if (confirm('Esvaziar a fila?')) { FILA = []; salvarFila(); render(); } };
@@ -1034,13 +1078,21 @@
     body.querySelectorAll('[data-ocdel]').forEach((a) => a.onclick = (e) => { e.preventDefault(); if (ocupado()) return; const [gid, oid] = a.dataset.ocdel.split('|'); const g = FILA.find((x) => String(x.id) === gid); if (g) g.oc = (g.oc || []).filter((o) => String(o.id) !== oid); salvarFila(); render(); });
     $('#f-sim').onclick = () => rodarFila(true);
     $('#f-run').onclick = () => rodarFila(false);
-    $('#p-salva').onclick = () => { const n = ($('#p-nome').value || '').trim() || ('plano ' + new Date().toLocaleDateString('pt-BR')); PLANOS[n] = JSON.parse(JSON.stringify(FILA)).map(({ oc, ...g }) => g); LS.set(K('planos'), PLANOS); status('Plano "' + n + '" salvo.'); render(); };
+    $('#p-salva').onclick = () => { const n = ($('#p-nome').value || '').trim() || ('plano ' + new Date().toLocaleDateString('pt-BR')); PLANOS[n] = JSON.parse(JSON.stringify(FILA.filter((g) => g.acao !== 'excluir'))).map(({ oc, ...g }) => g); LS.set(K('planos'), PLANOS); status('Plano "' + n + '" salvo.' + (FILA.some((g) => g.acao === 'excluir') ? ' O que era para excluir não entra no plano.' : '')); render(); };
     body.querySelectorAll('[data-pl]').forEach((b) => b.onclick = () => { FILA = FILA.concat(JSON.parse(JSON.stringify(PLANOS[b.dataset.pl])).map((g, i) => ({ ...g, id: Date.now() + i }))); salvarFila(); render(); });
     body.querySelectorAll('[data-plf]').forEach((b) => b.onclick = () => { const df = $('#p-df').value || hojeStr(); FILA = FILA.concat(JSON.parse(JSON.stringify(PLANOS[b.dataset.plf])).map((g, i) => ({ ...g, id: Date.now() + i, acao: 'fechar', dFechar: df }))); salvarFila(); status('Plano carregado como FECHAR em ' + fmt(df) + '. As fichas mantêm a data de abertura do plano.'); render(); });
     body.querySelectorAll('[data-pld]').forEach((b) => b.onclick = () => { if (confirm('Apagar o plano "' + b.dataset.pld + '"?')) { delete PLANOS[b.dataset.pld]; LS.set(K('planos'), PLANOS); render(); } });
     $('#r-copia').onclick = () => {
       const tsv = ['Local\tFVS\tAção\tResultado\tDetalhe\tQuando'].concat(RESULT.map((x) => [x.area, x.fvs, x.acao, x.resultado, x.msg, x.quando].join('\t'))).join('\n');
       navigator.clipboard.writeText(tsv).then(() => status('Resultado copiado.'), () => status('Não deu para copiar.'));
+    };
+    const bd = $('#r-desfaz'); if (bd) bd.onclick = () => {
+      if (ocupado()) return;
+      const por = new Map(); desfaz.forEach((x) => { if (!por.has(x.fvs)) por.set(x.fvs, []); por.get(x.fvs).push(x.area); });
+      if (!confirm(`Pôr na fila para EXCLUIR as ${desfaz.length} ficha(s) abertas neste resultado?\n\n${[...por].map(([f, L]) => `• ${f}: ${L.map(localComTorre).join(', ')}`).join('\n')}\n\nNada é excluído agora: depois você simula e executa na fila.`)) return;
+      let i = 0;
+      for (const [fvs, L] of por) FILA.push({ id: Date.now() + i++, fvs, acao: 'excluir', areas: [...new Set(L)].sort((a, b) => a.localeCompare(b, 'pt', { numeric: true })), dAbrir: hojeStr(), dFechar: hojeStr(), opc: {} });
+      salvarFila(); render(); status(`Na fila: excluir ${desfaz.length} ficha(s). Clique em Simular para conferir e depois em Executar no SGQ.`);
     };
   }
   function tabelaRes(L) {
@@ -1059,7 +1111,7 @@
   async function rodarFilaJa(simular, tarefas) {
     if (!simular) { await lerAviso(true); const b = bloqueio(); if (b) { render(); status(b); return; } }
     if (!simular && !sessaoDaTela()) { status('Antes de gravar, clique em qualquer menu do SGQ (ex.: Dashboard) e espere carregar: o Prisma usa a mesma sessão da tela.'); return; }
-    if (!simular && !confirm(`Vai GRAVAR no SGQ ${tarefas.length} ficha(s):\n\n${FILA.map((g) => `• ${g.acao === 'abrir' ? 'ABRIR em ' + fmt(g.dAbrir) : 'FECHAR em ' + fmt(g.dFechar)} · ${g.fvs} · ${g.areas.length} local(is)`).join('\n')}\n\nInspecionado por: ${CFG.nomeInspecionado}\nAprovado por: ${CFG.nomeAprovado}\n\nContinuar?`)) return;
+    if (!simular && !confirm(`Vai GRAVAR no SGQ ${tarefas.length} ficha(s):\n\n${FILA.map((g) => `• ${g.acao === 'excluir' ? 'EXCLUIR a ficha aberta' : g.acao === 'abrir' ? 'ABRIR em ' + fmt(g.dAbrir) : 'FECHAR em ' + fmt(g.dFechar)} · ${g.fvs} · ${g.areas.length} local(is)`).join('\n')}${FILA.some((g) => g.acao === 'excluir') ? '\n\nATENÇÃO: excluir não tem volta, a ficha some do SGQ.' : ''}\n\nInspecionado por: ${CFG.nomeInspecionado}\nAprovado por: ${CFG.nomeAprovado}\n\nContinuar?`)) return;
     PARAR = false; RESULT = []; const feitos = new Set();
     for (let k = 0; k < tarefas.length; k++) {
       if (PARAR) { status('Parado por você.'); break; }
@@ -1340,10 +1392,11 @@
   function eventoDe(h) {
     if (h.src === 'sgq') return { finalizada: 'Finalizada', iniciada: 'Iniciada', reaberta: 'Voltou a ficar aberta', nova: 'FVS nova no local', zerada: 'Itens apagados' }[h.ev] || h.ev;
     if (h.r !== 'OK') return 'Pendente';
+    if (h.ac === 'excluir') return /^já/.test(h.d || '') ? 'Já não tinha ficha aberta' : 'Ficha excluída';
     if (/^(já|a FVS aparece)/.test(h.d || '')) return h.ac === 'abrir' ? 'Já estava aberta' : 'Já estava fechada';
     return h.ac === 'abrir' ? 'Aberta' : /finalizada/.test(h.d || '') ? 'Fechada e finalizada' : 'Fechada';
   }
-  const COR_EV = { 'Aberta': '#e3a21a', 'Iniciada': '#e3a21a', 'Fechada e finalizada': '#2f9a5a', 'Finalizada': '#2f9a5a', 'Fechada': '#2f9a5a', 'Pendente': '#d2463c', 'Voltou a ficar aberta': '#d2463c', 'Itens apagados': '#d2463c' };
+  const COR_EV = { 'Aberta': '#e3a21a', 'Iniciada': '#e3a21a', 'Fechada e finalizada': '#2f9a5a', 'Finalizada': '#2f9a5a', 'Fechada': '#2f9a5a', 'Pendente': '#d2463c', 'Voltou a ficar aberta': '#d2463c', 'Itens apagados': '#d2463c', 'Ficha excluída': '#d2463c' };
   function renderHist() {
     const body = $('#bf2-body');
     salvarHist(); // traz o que outra aba do SGQ tenha gravado e tira o que passou de 10 dias
