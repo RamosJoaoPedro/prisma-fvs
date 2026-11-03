@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Prisma - FVS no SGQ
 // @namespace    realiza-bot-fvs
-// @version      2.24
+// @version      2.25
 // @author       João Pedro Ramos
 // @description  Prisma: mapa das torres, fila de comandos, relatórios e preenchimento de FVS no SGQ da Realiza, com travas de segurança. Usa o login do próprio usuário no SGQ.
 // @match        https://gdol.sgq2.com.br/*
@@ -17,7 +17,7 @@
 
   // ============================== CONFIGURAÇÃO PADRÃO ==============================
   // Tudo aqui pode ser trocado pela aba "Configuração" do painel (fica salvo no navegador).
-  const VERSAO = '2.24';
+  const VERSAO = '2.25';
   const CANAL = 'teste'; // 'oficial' ou 'teste' (o arquivo prisma-teste.user.js usa 'teste')
   const PADRAO = {
     obraNome: '', idObra: null,
@@ -93,17 +93,36 @@
   const API_RX = /gdolproducao-api\.sgq2\.com\.br/;
   const CAP = { h: {}, ts: 0 };
   const fetchOrig = window.fetch.bind(window);
+  // "Ensinar a criar local": enquanto a pessoa cria UM local à mão na tela do SGQ, o Prisma anota as gravações que a
+  // própria tela manda para a API (endereço, corpo e resposta). Depois repete os mesmos passos trocando só o nome do local.
+  // Só anota com o modo ligado, só chamadas para a API do SGQ e nunca consultas (GET). Fica guardado só neste navegador.
+  const REC = LS.get('recLocal', null) || { ativo: false, passos: [] };
+  const recNovo = (m, u, body) => {
+    if (!REC.ativo || /^(GET|HEAD|OPTIONS)$/i.test(m || 'GET') || !API_RX.test(u || '')) return null;
+    const p = { m: String(m).toUpperCase(), u: String(u), b: typeof body === 'string' ? body : '', r: '', st: 0 };
+    REC.passos.push(p); LS.set('recLocal', REC); return p;
+  };
+  const recResp = (p, st, txt) => { if (!p) return; p.st = st; p.r = String(txt || '').slice(0, 20000); LS.set('recLocal', REC); };
   (function capturar() {
     const guarda = (k, v) => { k = String(k).toLowerCase(); if (k === 'content-type' || k === 'content-length') return; CAP.h[k] = String(v); CAP.ts = Date.now(); };
     try {
       const op = XMLHttpRequest.prototype.open, sh = XMLHttpRequest.prototype.setRequestHeader;
-      XMLHttpRequest.prototype.open = function (m, u) { this.__pu = String(u || ''); return op.apply(this, arguments); };
+      const sd = XMLHttpRequest.prototype.send;
+      XMLHttpRequest.prototype.open = function (m, u) { this.__pu = String(u || ''); this.__pm = String(m || 'GET'); return op.apply(this, arguments); };
       XMLHttpRequest.prototype.setRequestHeader = function (k, v) { try { if (API_RX.test(this.__pu || '')) guarda(k, v); } catch (e) {} return sh.apply(this, arguments); };
+      XMLHttpRequest.prototype.send = function (body) {
+        try { const p = recNovo(this.__pm, this.__pu, body); if (p) this.addEventListener('loadend', () => { try { recResp(p, this.status, this.responseType && this.responseType !== 'text' ? JSON.stringify(this.response) : this.responseText); } catch (e) {} }); } catch (e) {}
+        return sd.apply(this, arguments);
+      };
     } catch (e) {}
     try {
       window.fetch = function (input, init) {
-        try { const u = typeof input === 'string' ? input : (input && input.url) || ''; if (API_RX.test(u)) new Headers((init && init.headers) || (input && input.headers) || {}).forEach((v, k) => guarda(k, v)); } catch (e) {}
-        return fetchOrig.apply(this, arguments);
+        let p = null;
+        try { const u = typeof input === 'string' ? input : (input && input.url) || ''; if (API_RX.test(u)) new Headers((init && init.headers) || (input && input.headers) || {}).forEach((v, k) => guarda(k, v));
+          p = recNovo((init && init.method) || (input && input.method) || 'GET', u, init && init.body); } catch (e) {}
+        const pr = fetchOrig.apply(this, arguments);
+        if (p) pr.then((r) => r.clone().text().then((t) => recResp(p, r.status, t))).catch(() => {});
+        return pr;
       };
     } catch (e) {}
   })();
@@ -213,6 +232,85 @@
     MAPA.areas[a.nome] = { id: a.id, fvs };
   }
   const salvarMapa = () => LS.set(K('mapa'), MAPA);
+
+  // ---------------------------------- criar local no SGQ ----------------------------------
+  // O local (área) é o "título" que a pessoa cadastra no SGQ antes de iniciar a FVS (ex.: "LADO A", "BLOCO 01 - HALL").
+  // A API do SGQ para criar área não é pública, então o Prisma aprende com a própria tela: a pessoa liga "Ensinar",
+  // cria um local à mão no SGQ (com as FVS que esse tipo de local leva) e clica em "Terminei". O Prisma guarda os passos
+  // e, para criar outro, repete os mesmos passos trocando o nome e os números (ids) que o SGQ devolve na hora.
+  const MOLDE_K = () => K('moldeLocal');
+  const ehLista = (o) => o && typeof o === 'object' && !Array.isArray(o) && ('rowsPerPage' in o || 'page' in o);
+  const caminhoApi = (u) => { const i = u.indexOf('/api/'); return i >= 0 ? u.slice(i + 4) : null; };
+  const folhas = (o, f, cam = []) => { if (o && typeof o === 'object') { for (const k of Object.keys(o)) folhas(o[k], f, cam.concat(k)); } else f(cam, o); };
+  const pegaCam = (o, cam) => cam.reduce((x, k) => (x == null ? x : x[k]), o);
+  const poeCam = (o, cam, v) => { const ult = cam[cam.length - 1]; const pai = cam.slice(0, -1).reduce((x, k) => x[k], o); pai[ult] = v; };
+  const nomeIgual = (v, nome) => typeof v === 'string' && norm(v) === norm(nome);
+  function recLigar(nome) { REC.ativo = true; REC.nome = nome; REC.obra = CFG.idObra; REC.ini = Date.now(); REC.passos = []; LS.set('recLocal', REC); }
+  function recDesligar() { REC.ativo = false; REC.passos = []; LS.set('recLocal', REC); }
+  // Transforma o que foi anotado num molde: o nome vira {$p:'nome'}, o id da área nova vira {$p:'area'} e ids que vieram
+  // na resposta de um passo anterior viram {$p:'r', i, cam}. Consultas de lista (page/rowsPerPage) ficam de fora.
+  async function recTerminar() {
+    const nome = REC.nome; if (!nome) throw new Error('Nada sendo ensinado.');
+    REC.ativo = false; LS.set('recLocal', REC);
+    AREAS = null; const area = (await listarAreas()).find((x) => norm(x.nome) === norm(nome));
+    if (!area) throw new Error(`Não achei no SGQ o local "${nome}". Confira se você salvou o local lá com exatamente esse nome e clique em Terminei de novo.`);
+    const brutos = REC.passos.filter((p) => p.st >= 200 && p.st < 300 && caminhoApi(p.u));
+    const passos = [];
+    for (const p of brutos) {
+      let b = null; try { b = p.b ? JSON.parse(p.b) : null; } catch (e) { continue; } // corpo que não é JSON (upload etc.) não entra
+      if (ehLista(b) || /dropdown/i.test(p.u)) continue;
+      let r = null; try { r = p.r ? JSON.parse(p.r) : null; } catch (e) {}
+      let cam = caminhoApi(p.u); let temNome = false;
+      if (cam.split('/').some((x) => x === String(area.id))) cam = cam.split('/').map((x) => (x === String(area.id) ? '{area}' : x)).join('/');
+      const subst = (v, c) => {
+        if (nomeIgual(v, nome)) { temNome = true; return { $p: 'nome' }; }
+        if (typeof v === 'number' && v === area.id && /^id/i.test(String(c[c.length - 1] || ''))) return { $p: 'area' };
+        if (typeof v === 'number' && v > 0 && v !== CFG.idObra && /^id/i.test(String(c[c.length - 1] || ''))) {
+          for (let i = passos.length - 1; i >= 0; i--) { let achou = null; folhas(passos[i].resp, (cc, vv) => { if (!achou && vv === v && /^id/i.test(String(cc[cc.length - 1] || ''))) achou = cc; }); if (achou) return { $p: 'r', i, cam: achou }; }
+        }
+        return v;
+      };
+      let molde = b;
+      if (b && typeof b === 'object') { molde = JSON.parse(JSON.stringify(b)); folhas(b, (c, v) => { const n = subst(v, c); if (n !== v) poeCam(molde, c, n); }); }
+      else molde = subst(b, []);
+      passos.push({ m: p.m, cam, body: molde, temNome, resp: r });
+    }
+    if (!passos.some((x) => x.temNome)) throw new Error('Não vi a tela do SGQ mandar o nome "' + nome + '". Ligue Ensinar de novo e crie o local só depois de ligar.');
+    const M = { nome, idArea: area.id, quando: new Date().toISOString(), passos: passos.map(({ m, cam, body }) => ({ m, cam, body })) };
+    LS.set(MOLDE_K(), M); recDesligar();
+    MAPA.areas[area.nome] || (await atualizarArea(area.nome)); salvarMapa();
+    return M;
+  }
+  const moldeLocal = () => LS.get(MOLDE_K(), null);
+  const descrevePasso = (p) => p.m + ' ' + p.cam.replace(/\?.*$/, '');
+  async function criarLocal(nome) {
+    const M = moldeLocal(); if (!M) throw new Error('O Prisma ainda não sabe criar local nesta obra. Use "Ensinar" primeiro.');
+    const b = bloqueio(); if (b) throw new Error(b);
+    if (!sessaoDaTela()) throw new Error('Mexa em qualquer tela do SGQ primeiro (para o Prisma pegar a sessão) e tente de novo.');
+    AREAS = null; if ((await listarAreas()).some((x) => norm(x.nome) === norm(nome))) throw new Error(`"${nome}" já existe no SGQ.`);
+    const resps = []; let idArea = null;
+    const idDaArea = async () => { if (idArea) return idArea; AREAS = null; const a = (await listarAreas()).find((x) => norm(x.nome) === norm(nome)); if (!a) throw new Error('O SGQ ainda não mostra o local novo na lista de áreas; parei antes de ligar as FVS.'); return (idArea = a.id); };
+    const monta = async (o) => {
+      if (o && typeof o === 'object' && o.$p) {
+        if (o.$p === 'nome') return nome;
+        if (o.$p === 'area') return idDaArea();
+        if (o.$p === 'r') { const v = pegaCam(resps[o.i], o.cam); if (v == null) throw new Error('O SGQ não devolveu o número que o passo seguinte precisa; parei.'); return v; }
+      }
+      if (Array.isArray(o)) { const L = []; for (const x of o) L.push(await monta(x)); return L; }
+      if (o && typeof o === 'object') { const R = {}; for (const k of Object.keys(o)) R[k] = await monta(o[k]); return R; }
+      return o;
+    };
+    for (let i = 0; i < M.passos.length; i++) {
+      const p = M.passos[i];
+      const cam = p.cam.includes('{area}') ? p.cam.replace(/\{area\}/g, await idDaArea()) : p.cam;
+      const r = await api(p.m, cam, await monta(p.body));
+      if (r.st < 200 || r.st >= 300) throw new Error(`O SGQ recusou o passo ${i + 1} de ${M.passos.length} (${descrevePasso(p)}: ${r.st}). ${i ? 'O local pode ter ficado criado pela metade: confira no SGQ.' : 'Nada foi criado.'}`);
+      resps.push(r.j);
+    }
+    await idDaArea(); await atualizarArea((AREAS.find((x) => x.id === idArea) || {}).nome || nome); salvarMapa();
+    HIST.push({ q: new Date().toISOString(), a: nome, f: '', ac: 'criar local', r: 'OK', d: 'local criado no SGQ', src: 'prisma', u: CFG.nomeInspecionado }); salvarHist();
+    return (AREAS.find((x) => x.id === idArea) || {}).nome || nome;
+  }
 
   // ---------------------------------- torres ----------------------------------
   // Leitura genérica dos nomes das áreas do SGQ, para qualquer obra. Exemplos que o Prisma entende sozinho:
@@ -827,6 +925,20 @@
   }
 
   // ------------------------------ aba MAPA ------------------------------
+  // Caixa do Mapa para criar no SGQ um local que ainda não existe (ou para ensinar o Prisma a criar).
+  function caixaLocalNovo() {
+    const M = moldeLocal(), nome = S.localNovo || '';
+    if (REC.ativo) return `<div class="warn"><b>Ensinando a criar local: "${esc(REC.nome)}"</b><br>
+      1. Feche o Prisma (ou use outra aba do SGQ).<br>2. Na tela de <b>Locais/Áreas</b> do SGQ, crie o local <b>${esc(REC.nome)}</b> e ligue nele as FVS que esse tipo de local leva. Salve.<br>3. Volte aqui e clique em <b>Terminei</b>.
+      <div class="muted" style="margin-top:4px">${REC.passos.length} gravação(ões) do SGQ anotada(s) até agora.</div>
+      <div class="row" style="gap:6px;margin-top:6px"><button class="b p" id="m-rec-fim">Terminei</button><button class="b" id="m-rec-cancela">Cancelar</button></div></div>`;
+    if (!nome) return M ? `<div class="muted" style="font-size:11px">Criar local: o Prisma aprendeu com "${esc(M.nome)}" (${M.passos.length} passo(s)). <a href="#" id="m-rec-novo">ensinar de novo</a> · <a href="#" id="m-rec-esquece">esquecer</a></div>` : '';
+    if (M) return `<div class="warn"><b>"${esc(nome)}" não existe no SGQ.</b> O Prisma pode criar esse local agora, do mesmo jeito que você criou "${esc(M.nome)}" (mesmas FVS ligadas), e já pôr na seleção.
+      <div class="row" style="gap:6px;margin-top:6px"><button class="b p" id="m-criar">Criar "${esc(nome)}" no SGQ</button><button class="b" id="m-criar-nao">Agora não</button></div>
+      <div class="muted" style="font-size:11px;margin-top:4px">Aprendido com "${esc(M.nome)}" em ${esc(new Date(M.quando).toLocaleDateString('pt-BR'))}. <a href="#" id="m-rec-novo">ensinar de novo</a></div></div>`;
+    return `<div class="warn"><b>"${esc(nome)}" não existe no SGQ.</b> O Prisma ainda não sabe criar local nesta obra. Ensine uma vez: clique em <b>Ensinar</b>, crie "${esc(nome)}" à mão na tela do SGQ e volte para clicar em Terminei. Depois disso, os próximos locais o Prisma cria sozinho.
+      <div class="row" style="gap:6px;margin-top:6px"><button class="b p" id="m-rec-ini">Ensinar com "${esc(nome)}"</button><button class="b" id="m-criar-nao">Agora não</button></div></div>`;
+  }
   function renderMapa() {
     const body = $('#bf2-body'); if (!body || S.aba !== 'mapa') return;
     const T = CFG.torres.find((t) => t.nome === S.torre) || CFG.torres[0];
@@ -859,7 +971,8 @@
         <button class="b full" id="m-limpa">Limpar seleção</button>
         <div class="row" style="gap:6px"><input id="m-local" list="m-locais" placeholder="escrever local do SGQ: BLOCO 02 - APTO 101" style="flex:1;min-width:140px"><button class="b" id="m-local-add">Adicionar</button></div>
         <datalist id="m-locais">${locais.map((n) => `<option value="${esc(n)}">`).join('')}</datalist>
-        <div class="muted" style="font-size:11px">Para um local que não aparece no desenho da torre: escreva o nome igual ao SGQ e clique em Adicionar. Ele entra na seleção.</div>
+        <div class="muted" style="font-size:11px">Para um local que não aparece no desenho da torre: escreva o nome e clique em Adicionar. Se ele já existe no SGQ, entra na seleção; se não existe, o Prisma oferece criar o local no SGQ.</div>
+        ${caixaLocalNovo()}
         <button class="b full" id="m-tudo-sel">Fechar todas as FVS não finalizadas da seleção</button><div id="m-tudo-sel-out"></div>
         <div class="muted">${S.sel.length} local(is) selecionado(s). Clique ou arraste por cima dos apartamentos; clique no número do andar ou da coluna para pegar a linha inteira.</div>
         <h4>O que fazer</h4>
@@ -904,16 +1017,39 @@
       const acha = (lista) => { const ex = lista.find((n) => norm(n) === norm(txt)); if (ex) return [ex]; return lista.filter((n) => norm(n).includes(norm(txt))); };
       let m = acha(conhecidos);
       if (!m.length) { status('Procurando "' + txt + '" nas áreas do SGQ...'); try { m = acha((await listarAreas()).map((a) => a.nome)); } catch (e) { return status('Não consegui ler as áreas do SGQ: ' + e.message); } }
-      if (!m.length) return status('Não achei esse local no SGQ. Escreva igual ao nome que aparece lá (ex.: "BLOCO 02 - APTO 101").');
+      if (!m.length) { S.localNovo = norm(txt); renderMapa(); return status(`"${norm(txt)}" não existe no SGQ. Veja abaixo do campo para criar o local.`); }
       if (m.length > 1) return status(`Achei ${m.length} locais parecidos (${m.slice(0, 4).map(localComTorre).join(', ')}${m.length > 4 ? '…' : ''}). Escreva o nome completo.`);
       const achado = m[0];
       if (!MAPA.areas[achado]) { status('Lendo ' + achado + ' no SGQ...'); try { await atualizarArea(achado); salvarMapa(); } catch (e) { return status('Erro ao ler ' + achado + ': ' + e.message); } }
       const T2 = torreDe(achado); if (T2 && T2.nome !== S.torre) S.torre = T2.nome;
       if (!S.sel.includes(achado)) S.sel.push(achado);
-      S.detalhe = achado; salvarTela(); renderMapa();
+      S.localNovo = ''; S.detalhe = achado; salvarTela(); renderMapa();
       status(localComTorre(achado) + ' adicionado à seleção.');
     };
     on('#m-local-add', 'onclick', addLocal);
+    on('#m-criar-nao', 'onclick', () => { S.localNovo = ''; renderMapa(); });
+    on('#m-rec-ini', 'onclick', () => { if (ocupado()) return; recLigar(S.localNovo); renderMapa(); status(`Ensinando: crie "${REC.nome}" na tela do SGQ e volte para clicar em Terminei.`); });
+    on('#m-rec-novo', 'onclick', (e) => { e.preventDefault(); const n = norm(S.localNovo || prompt('Nome do local que você vai criar à mão no SGQ para ensinar o Prisma:') || ''); if (!n) return; recLigar(n); renderMapa(); status(`Ensinando: crie "${n}" na tela do SGQ e volte para clicar em Terminei.`); });
+    on('#m-rec-esquece', 'onclick', (e) => { e.preventDefault(); if (confirm('Esquecer como criar local nesta obra?')) { LS.set(MOLDE_K(), null); renderMapa(); } });
+    on('#m-rec-cancela', 'onclick', () => { recDesligar(); renderMapa(); status('Ensino cancelado. Nada foi guardado.'); });
+    on('#m-rec-fim', 'onclick', async () => {
+      if (ocupado()) return; const n = REC.nome; status('Conferindo "' + n + '" no SGQ...');
+      try { const M = await recTerminar(); S.localNovo = '';
+        if (MAPA.areas[n] && !S.sel.includes(n)) S.sel.push(n); S.detalhe = MAPA.areas[n] ? n : S.detalhe; salvarTela();
+        status(`Aprendido: ${M.passos.length} passo(s) (${M.passos.map(descrevePasso).join(' → ')}). "${n}" entrou na seleção; os próximos locais o Prisma cria sozinho.`);
+      } catch (e) { status(e.message); }
+      renderMapa();
+    });
+    on('#m-criar', 'onclick', async () => {
+      if (ocupado()) return; const n = S.localNovo; const M = moldeLocal(); if (!n || !M) return;
+      if (!confirm(`Criar o local "${n}" no SGQ?\n\nO Prisma repete os ${M.passos.length} passo(s) que aprendeu com "${M.nome}" (mesmas FVS ligadas), trocando só o nome.\nIsso GRAVA no SGQ.`)) return;
+      RODANDO = true; status('Criando "' + n + '" no SGQ...');
+      try { const nome = await criarLocal(n); S.localNovo = ''; if (!S.sel.includes(nome)) S.sel.push(nome); S.detalhe = nome; salvarTela();
+        const q = Object.keys((MAPA.areas[nome] || {}).fvs || {}).length;
+        status(`"${nome}" criado no SGQ com ${q} FVS e posto na seleção.${MAPA.areas[nome] && !MAPA.areas[nome].fvs[S.serv] ? ` Atenção: ${S.serv} não veio ligada nele.` : ''}`);
+      } catch (e) { status('Não criei: ' + e.message); }
+      RODANDO = false; renderMapa();
+    });
     on('#m-local', 'onkeydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); addLocal(); } });
     on('#m-tudo', 'onclick', () => fecharTudo([S.detalhe], 'm-tudo-out'));
     on('#m-reler', 'onclick', async () => {
@@ -1431,11 +1567,12 @@
   function eventoDe(h) {
     if (h.src === 'sgq') return { finalizada: 'Finalizada', iniciada: 'Iniciada', reaberta: 'Voltou a ficar aberta', nova: 'FVS nova no local', zerada: 'Itens apagados' }[h.ev] || h.ev;
     if (h.r !== 'OK') return 'Pendente';
+    if (h.ac === 'criar local') return 'Local criado';
     if (h.ac === 'excluir') return /^já/.test(h.d || '') ? 'Já não tinha ficha aberta' : 'Ficha excluída';
     if (/^(já|a FVS aparece)/.test(h.d || '')) return h.ac === 'abrir' ? 'Já estava aberta' : 'Já estava fechada';
     return h.ac === 'abrir' ? 'Aberta' : /finalizada/.test(h.d || '') ? 'Fechada e finalizada' : 'Fechada';
   }
-  const COR_EV = { 'Aberta': '#e3a21a', 'Iniciada': '#e3a21a', 'Fechada e finalizada': '#2f9a5a', 'Finalizada': '#2f9a5a', 'Fechada': '#2f9a5a', 'Pendente': '#d2463c', 'Voltou a ficar aberta': '#d2463c', 'Itens apagados': '#d2463c', 'Ficha excluída': '#d2463c' };
+  const COR_EV = { 'Aberta': '#e3a21a', 'Iniciada': '#e3a21a', 'Fechada e finalizada': '#2f9a5a', 'Finalizada': '#2f9a5a', 'Fechada': '#2f9a5a', 'Local criado': '#7a5cff', 'Pendente': '#d2463c', 'Voltou a ficar aberta': '#d2463c', 'Itens apagados': '#d2463c', 'Ficha excluída': '#d2463c' };
   function renderHist() {
     const body = $('#bf2-body');
     salvarHist(); // traz o que outra aba do SGQ tenha gravado e tira o que passou de 10 dias
