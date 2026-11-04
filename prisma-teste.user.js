@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Prisma - FVS no SGQ
 // @namespace    realiza-bot-fvs
-// @version      2.26
+// @version      2.27
 // @author       João Pedro Ramos
 // @description  Prisma: mapa das torres, fila de comandos, relatórios e preenchimento de FVS no SGQ da Realiza, com travas de segurança. Usa o login do próprio usuário no SGQ.
 // @match        https://gdol.sgq2.com.br/*
@@ -17,7 +17,7 @@
 
   // ============================== CONFIGURAÇÃO PADRÃO ==============================
   // Tudo aqui pode ser trocado pela aba "Configuração" do painel (fica salvo no navegador).
-  const VERSAO = '2.26';
+  const VERSAO = '2.27';
   const CANAL = 'teste'; // 'oficial' ou 'teste' (o arquivo prisma-teste.user.js usa 'teste')
   const PADRAO = {
     obraNome: '', idObra: null,
@@ -579,6 +579,16 @@
       if (!x.inspecao1 && !(g.br || []).includes(o)) { x.inspecao1 = g.na.includes(o) ? 'N' : 'A'; x.dataInspecao1 = isoItem(g.pre && o <= g.pre ? t.dAbrir : t.dFechar); preenchidos++; }
     }
     if (t.acao === 'abrir' && !preenchidos && V.status === 3 && !assumidaDe) return OK('já estava iniciada com os pré-requisitos');
+    // O SGQ só encerra com todos os itens da 1ª inspeção marcados. Item que ficou vazio (marcado "—" no gabarito, ou que
+    // a ficha trouxe sem valor) faria o SGQ recusar com "Ainda existem itens da 1ª Inspeção em aberto!". Avisa antes, já na simulação.
+    if (t.acao === 'fechar') {
+      const vazios = itens.filter((x) => !x.inspecao1).map((x) => parseInt(x.ordem, 10)).sort((p, q) => p - q);
+      if (vazios.length) {
+        const doGab = vazios.filter((o) => (g.br || []).includes(o));
+        return PEND(`item(ns) ${vazios.join(', ')} em branco: o SGQ só encerra com todos os itens marcados (A, NA, R ou X).` +
+          (doGab.length ? ` ${doGab.length === vazios.length ? 'Eles estão' : 'Os itens ' + doGab.join(', ') + ' estão'} como "—" (em branco) no gabarito de ${t.fvs}: troque para A ou NA na aba Gabaritos, ou marque na mão na ficha.` : ' Marque na mão na ficha e rode de novo.'));
+      }
+    }
 
     let ocCriar = [], ocCompletar = [];
     if (t.acao === 'fechar' && t.opc.segunda) {
