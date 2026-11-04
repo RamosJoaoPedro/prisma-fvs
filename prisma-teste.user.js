@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Prisma - FVS no SGQ
 // @namespace    realiza-bot-fvs
-// @version      2.25
+// @version      2.26
 // @author       João Pedro Ramos
 // @description  Prisma: mapa das torres, fila de comandos, relatórios e preenchimento de FVS no SGQ da Realiza, com travas de segurança. Usa o login do próprio usuário no SGQ.
 // @match        https://gdol.sgq2.com.br/*
@@ -17,7 +17,7 @@
 
   // ============================== CONFIGURAÇÃO PADRÃO ==============================
   // Tudo aqui pode ser trocado pela aba "Configuração" do painel (fica salvo no navegador).
-  const VERSAO = '2.25';
+  const VERSAO = '2.26';
   const CANAL = 'teste'; // 'oficial' ou 'teste' (o arquivo prisma-teste.user.js usa 'teste')
   const PADRAO = {
     obraNome: '', idObra: null,
@@ -692,6 +692,7 @@
     acao: 'fechar', dAbrir: hojeStr(), dFechar: hojeStr(), assumir: false, segunda: false, tratativa: '',
   }, LS.get(K('tela'), {}), { sel: [] });
   if (S.acao === 'excluir') S.acao = 'fechar'; // reabrir o Prisma nunca começa no modo Excluir
+  if (S.aba === 'colar') S.aba = 'mapa'; // a aba Colar roteiro saiu na 2.26
   let FILA = LS.get(K('fila'), []);
   let HIST = LS.get(K('hist'), []);
   // Histórico: guarda os últimos 10 dias. Antes era um limite de 6000 registros (uma leitura grande do mapa podia empurrar
@@ -914,14 +915,14 @@
     root.classList.toggle('dark', !!CFG.escuro);
     root.innerHTML = `
       <div class="top"><div class="marca">${(() => { const t = Date.now() - GIRA; return t < 700 ? `<span class="ic gira" style="--d:-${t}ms"></span>` : '<span class="ic"></span>'; })()}<span><b>Prisma</b><small>FVS · ${esc(CFG.obraNome)}</small></span></div>
-        <div class="tabs">${[['mapa', 'Mapa'], ['fila', `Fila (${nFila})`], ['rel', 'Relatório/Qualidade'], ['hist', 'Histórico'], ['colar', 'Colar roteiro'], ['gab', 'Gabaritos'], ['cfg', 'Configuração']].map(([k, t]) => `<button data-aba="${k}" class="${S.aba === k ? 'on' : ''}">${t}</button>`).join('')}</div>
+        <div class="tabs">${[['mapa', 'Mapa'], ['fila', `Fila (${nFila})`], ['rel', 'Relatório/Qualidade'], ['hist', 'Histórico'], ['gab', 'Gabaritos'], ['cfg', 'Configuração']].map(([k, t]) => `<button data-aba="${k}" class="${S.aba === k ? 'on' : ''}">${t}</button>`).join('')}</div>
         <button class="x" id="bf2-x">Fechar</button></div>
       ${avisoHtml()}<div class="body" id="bf2-body"></div>
       <div class="foot"><span class="msg" id="bf2-status">${esc(STATUS)}</span><span class="assin">Prisma v${VERSAO}${CANAL === 'teste' ? ' (TESTE)' : ''} · criado por João Pedro Ramos</span></div>`;
     root.querySelectorAll('[data-aba]').forEach((b) => b.onclick = () => { if (!configurado() && b.dataset.aba !== 'cfg') return status('Termine a configuração inicial primeiro.'); S.aba = b.dataset.aba; salvarTela(); render(); });
     if (!configurado()) S.aba = 'cfg';
     $('#bf2-x').onclick = fechaPainel;
-    ({ mapa: renderMapa, fila: renderFila, rel: renderRel, hist: renderHist, colar: renderColar, gab: renderGab, cfg: renderCfg })[S.aba]();
+    ({ mapa: renderMapa, fila: renderFila, rel: renderRel, hist: renderHist, gab: renderGab, cfg: renderCfg })[S.aba]();
   }
 
   // ------------------------------ aba MAPA ------------------------------
@@ -1218,7 +1219,7 @@
           <td>${g.areas.map((a) => esc(localComTorre(a))).join(', ')}</td>
           <td class="muted">${[g.opc && g.opc.assumir ? 'assume fichas da lista' : '', g.opc && g.opc.segunda ? '2ª inspeção' + (g.opc.tratativa ? ': "' + esc(g.opc.tratativa) + '"' : '') : '', g.na ? 'gabarito do roteiro' : ''].filter(Boolean).join('<br>')}
             ${(g.oc || []).map((o) => `<div style="color:var(--verm)">ocorrência · ${esc(localCurto(o.area))} · item ${o.item}: "${esc(o.texto.length > 60 ? o.texto.slice(0, 60) + '…' : o.texto)}" <a href="#" data-ocdel="${g.id}|${o.id}" style="color:var(--muted)">tirar</a></div>`).join('')}</td>
-          <td><button class="b" data-del="${g.id}" ${RODANDO ? 'disabled' : ''}>Tirar</button></td></tr>`).join('')}</table>` : '<div class="muted">A fila está vazia. Monte no Mapa ou cole um roteiro.</div>'}
+          <td><button class="b" data-del="${g.id}" ${RODANDO ? 'disabled' : ''}>Tirar</button></td></tr>`).join('')}</table>` : '<div class="muted">A fila está vazia. Monte no Mapa.</div>'}
       <div class="row">
         <button class="b" id="f-sim" ${FILA.length && !RODANDO ? '' : 'disabled'}>Simular (não grava)</button>
         <button class="b p" id="f-run" ${FILA.length && !RODANDO ? '' : 'disabled'}>Executar no SGQ</button>
@@ -1297,35 +1298,6 @@
     }
     const ok = RESULT.filter((x) => x.resultado === 'OK').length;
     status(`${simular ? 'Simulação' : 'Execução'} terminada: ${ok} OK, ${RESULT.length - ok} pendente(s).${simular ? ' Nada foi gravado.' : ' O que deu OK saiu da fila; o pendente ficou nela.'}`);
-  }
-
-  // ------------------------------ aba COLAR ROTEIRO ------------------------------
-  function renderColar() {
-    const body = $('#bf2-body');
-    body.innerHTML = `<div class="card topo"><h4>Colar roteiro</h4>
-      <div class="nota">Para listas prontas no formato de roteiro (como os Roteiros 1 a 5 que o Claude gera). A planilha da qualidade ainda não entra aqui direto: mande ela para o Claude, que ele devolve o roteiro pronto para colar.</div>
-      <textarea id="c-txt" style="min-height:max(240px,45vh)" placeholder="ID	Área no SGQ	FVS	Situação hoje	O que fazer	Itens a marcar	Status final	Ocorrências	Feito"></textarea>
-      <div class="row"><label style="max-width:200px">Abrir em<input type="date" id="c-dA" value="${esc(S.dAbrir)}" max="${hojeStr()}"></label><label style="max-width:200px">Fechar em<input type="date" id="c-dF" value="${esc(S.dFechar)}" max="${hojeStr()}"></label>
-        <button class="b p" id="c-ok">Mandar para a fila</button></div></div>`;
-    $('#c-ok').onclick = () => {
-      const dA = $('#c-dA').value, dF = $('#c-dF').value; let n = 0; const pulou = [];
-      for (const linha of $('#c-txt').value.split(/\r?\n/)) {
-        const c = linha.split('\t').map((x) => (x || '').trim());
-        if (!/^\d+$/.test(c[0] || '')) continue;
-        // Linha com colunas faltando (copiada pela metade) não pode derrubar o roteiro inteiro.
-        const [, area = '', fvs = '', , oq = '', itens = '', stf = '', oc = '', feito = ''] = c;
-        if (!area || !fvs) { pulou.push(c[0]); continue; }
-        if (/^(true|verdadeiro|sim|x|ok)$/i.test(feito || '') || /parad/i.test(oq)) continue;
-        const abrir = /iniciada/i.test(stf) && !/encerrad/i.test(stf);
-        const na = listaNum((itens.match(/NA n[oa]s? ([0-9 ,e]+)/i) || [])[1]);
-        const fx = itens.match(/itens (\d+) a (\d+)/i);
-        FILA.push({ id: Date.now() + n, fvs: codNorm(fvs), acao: abrir ? 'abrir' : 'fechar', areas: [area], dAbrir: dA, dFechar: abrir ? dA : dF, na, pre: abrir && fx ? +fx[2] : null,
-          opc: { assumir: /assumir/i.test(oq), segunda: /2[ªa] inspe|segunda inspe|tratativa/i.test(oq), tratativa: (/^tratativa:\s*(.+)$/i.exec(oc || '') || [])[1] || '' } });
-        n++;
-      }
-      salvarFila(); S.aba = 'fila'; render();
-      status(n + ' linha(s) mandadas para a fila.' + (pulou.length ? ` ${pulou.length} linha(s) ignorada(s) por falta de área ou FVS (ID ${pulou.join(', ')}).` : ''));
-    };
   }
 
   // ------------------------------ aba GABARITOS ------------------------------
@@ -1682,7 +1654,7 @@
   function previewRel() {
     const c = contarSit(REL.linhas);
     return `<div class="row" style="justify-content:space-between"><div><h4>${esc(REL.titulo)}</h4><div class="muted">${esc(REL.subtitulo)}</div></div>
-      <div class="row"><button class="b p" id="r-xlsx">Baixar planilha (modelo Controle de FVS)</button><button class="b" id="r-copy">Copiar para Excel</button><button class="b" id="r-copy-painel">Copiar painel</button></div></div>
+      <div class="row"><button class="b p" id="r-dash">Abrir dashboard</button><button class="b p" id="r-xlsx">Baixar planilha (modelo Controle de FVS)</button><button class="b" id="r-copy">Copiar para Excel</button><button class="b" id="r-copy-painel">Copiar painel</button></div></div>
       ${painelHtml(REL.linhas)}
       <div class="muted">${Object.entries(c).map(([k, n]) => `${n} ${SIT[k].toLowerCase()}`).join(' · ')}</div>
       ${REL.naoEntendi && REL.naoEntendi.length ? `<div class="warn">${REL.naoEntendi.map(esc).join('<br>')}</div>` : ''}
@@ -1692,6 +1664,7 @@
   }
   function ligarBotoesRel() {
     const p = $('#r-xlsx'); if (p) p.onclick = () => { try { baixarPlanilha(); } catch (e) { status('Erro ao montar a planilha: ' + e.message); } };
+    const dsh = $('#r-dash'); if (dsh) dsh.onclick = () => { try { abrirDashboard(); } catch (e) { status('Erro ao montar o dashboard: ' + e.message); } };
     const c = $('#r-copy'); if (c) c.onclick = () => {
       const tsv = [['Torre', 'Local', 'FVS', 'Serviço', 'Situação', REL.tipo === 'ppc' ? 'Aberta?' : null, 'Itens', 'Responsável', 'Abertura', 'Encerramento'].filter((x) => x !== null).join('\t')]
         .concat(REL.linhas.map((x) => [x.torre, localCurto(x.area), x.cod, nomeLimpo(x.cod), SIT[x.sit] + (x.rx ? ' · R/X' : ''), REL.tipo === 'ppc' ? abertaTxt(x.sit) : null, x.itens, x.inspetor, x.abertura, x.encerramento].filter((v) => v !== null).join('\t'))).join('\n');
@@ -1808,6 +1781,103 @@
     return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><c:roundedCorners val="0"/><c:chart><c:title><c:tx><c:rich><a:bodyPr/><a:p><a:r><a:t>FVS por serviço</a:t></a:r></a:p></c:rich></c:tx><c:overlay val="0"/></c:title><c:autoTitleDeleted val="0"/><c:plotArea><c:layout/><c:barChart><c:barDir val="bar"/><c:grouping val="stacked"/><c:varyColors val="0"/>${ser}<c:gapWidth val="40"/><c:overlap val="100"/><c:axId val="5101"/><c:axId val="5102"/></c:barChart><c:catAx><c:axId val="5101"/><c:scaling><c:orientation val="maxMin"/></c:scaling><c:delete val="0"/><c:axPos val="l"/><c:numFmt formatCode="General" sourceLinked="0"/><c:tickLblPos val="nextTo"/><c:crossAx val="5102"/><c:crosses val="autoZero"/><c:auto val="1"/><c:lblAlgn val="ctr"/><c:lblOffset val="100"/><c:noMultiLvlLbl val="0"/></c:catAx><c:valAx><c:axId val="5102"/><c:scaling><c:orientation val="minMax"/></c:scaling><c:delete val="0"/><c:axPos val="b"/><c:majorGridlines/><c:numFmt formatCode="General" sourceLinked="1"/><c:tickLblPos val="nextTo"/><c:crossAx val="5101"/><c:crosses val="max"/><c:crossBetween val="between"/></c:valAx></c:plotArea><c:legend><c:legendPos val="b"/><c:overlay val="0"/></c:legend><c:plotVisOnly val="1"/><c:dispBlanksAs val="gap"/></c:chart></c:chartSpace>`;
   }
 
+  // Pizza do "Resumo Geral de FVS" (Dashboard A6:B8), como no Dashboard da qualidade: verde encerrada, amarelo iniciada, vermelho sem iniciar.
+  function pizzaXml() {
+    const pt = [['92D050', 0], ['FFC000', 1], ['FF0000', 2]].map(([cor, i]) => `<c:dPt><c:idx val="${i}"/><c:bubble3D val="0"/><c:spPr><a:solidFill><a:srgbClr val="${cor}"/></a:solidFill><a:ln><a:solidFill><a:srgbClr val="FFFFFF"/></a:solidFill></a:ln></c:spPr></c:dPt>`).join('');
+    return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><c:roundedCorners val="0"/><c:chart><c:title><c:tx><c:rich><a:bodyPr/><a:p><a:r><a:t>Resumo Geral de FVS</a:t></a:r></a:p></c:rich></c:tx><c:overlay val="0"/></c:title><c:autoTitleDeleted val="0"/><c:plotArea><c:layout/><c:pieChart><c:varyColors val="1"/><c:ser><c:idx val="0"/><c:order val="0"/>${pt}<c:dLbls><c:numFmt formatCode="0.0%" sourceLinked="0"/><c:spPr><a:noFill/><a:ln><a:noFill/></a:ln></c:spPr><c:showLegendKey val="0"/><c:showVal val="0"/><c:showCatName val="0"/><c:showSerName val="0"/><c:showPercent val="1"/><c:showBubbleSize val="0"/><c:showLeaderLines val="1"/></c:dLbls><c:cat><c:strRef><c:f>Dashboard!$A$6:$A$8</c:f></c:strRef></c:cat><c:val><c:numRef><c:f>Dashboard!$B$6:$B$8</c:f></c:numRef></c:val></c:ser><c:firstSliceAng val="0"/></c:pieChart></c:plotArea><c:legend><c:legendPos val="b"/><c:overlay val="0"/></c:legend><c:plotVisOnly val="1"/><c:dispBlanksAs val="gap"/></c:chart></c:chartSpace>`;
+  }
+
+  // ------------------------------ DASHBOARD (página para ver, imprimir ou salvar em PDF) ------------------------------
+  // Mesmo conteúdo do Dashboard da planilha de controle (resumo, pizza e barras por serviço), mais o recorte por bloco e uma tabela.
+  // Conta pela mesma regra da planilha: cada linha do Registro de FVS é uma FVS, com status ENCERRADA, INICIADA ou SEM INICIAR.
+  function dadosDashboard(R) {
+    const L = R.linhas.map(linhaPlanilha).filter((r) => r[5]);
+    const soma = (rows) => { const o = { enc: 0, ini: 0, sem: 0 }; rows.forEach((r) => { if (r[5] === 'ENCERRADA') o.enc++; else if (r[5] === 'INICIADA') o.ini++; else if (r[5] === 'SEM INICIAR') o.sem++; }); o.total = o.enc + o.ini + o.sem; o.pct = o.total ? o.enc / o.total : 0; return o; };
+    const agrupa = (i) => { const m = new Map(); L.forEach((r) => { const k = String(r[i] || '—'); if (!m.has(k)) m.set(k, []); m.get(k).push(r); }); return [...m].map(([nome, rows]) => ({ nome, ...soma(rows) })); };
+    return { geral: soma(L), servicos: agrupa(3).sort((a, b) => b.total - a.total), blocos: agrupa(0).sort((a, b) => a.nome.localeCompare(b.nome, 'pt', { numeric: true })) };
+  }
+  function dashboardHtml(R) {
+    const D = dadosDashboard(R), G = D.geral;
+    const nf = (v) => Number(v).toLocaleString('pt-BR'), pf = (v) => (v * 100).toLocaleString('pt-BR', { minimumFractionDigits: 1, maximumFractionDigits: 1 }) + '%';
+    const COR = { enc: '#2f9a5a', ini: '#e3a21a', sem: '#d2463c' }, NOME = { enc: 'Encerradas', ini: 'Iniciadas', sem: 'Sem iniciar' };
+    // rosca
+    const rosca = (() => {
+      if (!G.total) return '<p class="vazio">Nenhuma FVS no relatório.</p>';
+      const R0 = 92, R1 = 54, cx = 110, cy = 110; let ang = -Math.PI / 2, out = '';
+      for (const k of ['enc', 'ini', 'sem']) {
+        const v = G[k]; if (!v) continue; const a2 = ang + (v / G.total) * Math.PI * 2 - (v === G.total ? 0.0001 : 0);
+        const p = (r, a) => `${(cx + r * Math.cos(a)).toFixed(2)} ${(cy + r * Math.sin(a)).toFixed(2)}`; const big = a2 - ang > Math.PI ? 1 : 0;
+        out += `<path d="M ${p(R0, ang)} A ${R0} ${R0} 0 ${big} 1 ${p(R0, a2)} L ${p(R1, a2)} A ${R1} ${R1} 0 ${big} 0 ${p(R1, ang)} Z" fill="${COR[k]}" stroke="#fff" stroke-width="2"><title>${NOME[k]}: ${nf(v)} (${pf(v / G.total)})</title></path>`;
+        if (v / G.total > 0.05) { const m = (ang + a2) / 2; out += `<text x="${cx + 73 * Math.cos(m)}" y="${cy + 73 * Math.sin(m)}" text-anchor="middle" dy="0.35em" fill="#fff" font-size="12" font-weight="700">${pf(v / G.total)}</text>`; }
+        ang = a2;
+      }
+      return `<svg viewBox="0 0 220 220" width="100%" style="max-width:260px" role="img" aria-label="Rosca das FVS por situação">${out}<text x="110" y="106" text-anchor="middle" font-size="26" fill="#14213d" font-family="Georgia,serif">${nf(G.total)}</text><text x="110" y="128" text-anchor="middle" font-size="12" fill="#5d6984">FVS</text></svg>`;
+    })();
+    // barras empilhadas (horizontal), largura fixa no viewBox
+    const barras = (L, alt, W = 900) => {
+      if (!L.length) return '<p class="vazio">Nenhuma FVS no relatório.</p>';
+      const lab = Math.min(W * 0.36, 12 + 7.2 * Math.max(...L.map((x) => x.nome.length))), dir = 56, top = 22, H = top + L.length * alt + 6;
+      const max = Math.max(...L.map((x) => x.total)) || 1, passo = [1, 2, 5, 10, 20, 25, 50, 100, 200, 250, 500, 1000].find((p) => max / p <= 8) || 2000, topo = Math.ceil(max / passo) * passo;
+      const X = (v) => lab + (v / topo) * (W - lab - dir);
+      let g = ''; for (let v = 0; v <= topo; v += passo) g += `<line x1="${X(v)}" x2="${X(v)}" y1="${top}" y2="${H - 6}" stroke="#e3e7ee"/><text x="${X(v)}" y="${top - 8}" text-anchor="middle" font-size="11" fill="#5d6984">${nf(v)}</text>`;
+      L.forEach((x, i) => {
+        const y = top + i * alt + alt * 0.14, h = alt * 0.72; let acc = 0;
+        g += `<text x="${lab - 8}" y="${y + h / 2}" dy="0.35em" text-anchor="end" font-size="12" fill="#14213d">${esc(x.nome)}</text>`;
+        for (const k of ['enc', 'ini', 'sem']) { if (x[k]) g += `<rect x="${X(acc)}" y="${y}" width="${Math.max(0, X(acc + x[k]) - X(acc))}" height="${h}" rx="2" fill="${COR[k]}"><title>${esc(x.nome)} · ${NOME[k]}: ${nf(x[k])}</title></rect>`; acc += x[k]; }
+        g += `<text x="${X(x.total) + 6}" y="${y + h / 2}" dy="0.35em" font-size="11" fill="#5d6984">${nf(x.total)}</text>`;
+      });
+      return `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="Barras empilhadas por situação">${g}</svg>`;
+    };
+    const leg = `<div class="leg">${['enc', 'ini', 'sem'].map((k) => `<span><i style="background:${COR[k]}"></i>${NOME[k]}</span>`).join('')}</div>`;
+    const pior = D.servicos.slice().sort((a, b) => b.sem - a.sem)[0];
+    const kpi = (cls, rot, v, sub) => `<div class="kpi ${cls}"><span>${rot}</span><b>${v}</b><small>${sub}</small></div>`;
+    const tabela = D.servicos.map((x) => `<tr><td>${esc(x.nome)}</td><td>${nf(x.sem)}</td><td>${nf(x.ini)}</td><td>${nf(x.enc)}</td><td>${nf(x.total)}</td><td>${pf(x.pct)}<span class="pb"><i style="width:${(x.pct * 100).toFixed(1)}%"></i></span></td></tr>`).join('');
+    return `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Dashboard FVS · ${esc(CFG.obraNome)}</title><style>
+      @page{size:A4;margin:12mm}
+      *{box-sizing:border-box}body{margin:0;background:#f3f5f9;color:#14213d;font:14px/1.5 "Segoe UI",Arial,sans-serif;font-variant-numeric:tabular-nums}
+      header{background:#001e44;color:#fff;padding:18px 22px;display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+      header h1{margin:0;font:400 26px Georgia,"Times New Roman",serif}header p{margin:2px 0 0;color:#b9c6dd;font-size:12px}header img{height:44px}
+      main{max-width:1100px;margin:0 auto;padding:18px 22px 30px;display:grid;gap:14px}
+      .tk{margin:0;font-size:15px}.tk b{font-weight:700}
+      .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
+      .kpi{background:#fff;border:1px solid #dfe4ec;border-top:3px solid #6d3fd1;border-radius:10px;padding:10px 14px;display:grid;gap:2px}
+      .kpi.ok{border-top-color:#2f9a5a}.kpi.warn{border-top-color:#e3a21a}.kpi.bad{border-top-color:#d2463c}
+      .kpi span{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:#5d6984}.kpi b{font:400 28px Georgia,serif}.kpi small{color:#5d6984;font-size:12px}
+      .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:14px;align-items:start}
+      .card{background:#fff;border:1px solid #dfe4ec;border-radius:10px;padding:14px 16px;display:grid;gap:8px;min-width:0;break-inside:avoid}
+      .card.w{grid-column:1/-1}.card h2{margin:0;font-size:15px}.nota{margin:0;color:#5d6984;font-size:12px}
+      .leg{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:12px;color:#5d6984}.leg i{display:inline-block;width:11px;height:11px;border-radius:2px;margin-right:5px;vertical-align:-1px;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+      .centro{display:grid;place-items:center}
+      table{border-collapse:collapse;width:100%;font-size:13px}th{background:#eef1f6;text-align:right;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:#5d6984;padding:6px 8px}
+      td{text-align:right;padding:5px 8px;border-bottom:1px solid #e3e7ee}th:first-child,td:first-child{text-align:left}tr{break-inside:avoid}
+      .pb{display:inline-block;width:60px;height:7px;border-radius:2px;background:#e3e7ee;margin-left:6px;vertical-align:middle;overflow:hidden}.pb i{display:block;height:100%;background:#2f9a5a;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+      svg rect,svg path{-webkit-print-color-adjust:exact;print-color-adjust:exact}
+      .acoes{display:flex;justify-content:flex-end}.acoes button{background:#6d3fd1;color:#fff;border:0;border-radius:8px;padding:9px 14px;font:600 13px "Segoe UI",sans-serif;cursor:pointer}
+      .vazio{color:#5d6984}.rod{color:#5d6984;font-size:11px;border-top:1px solid #dfe4ec;padding-top:8px}
+      @media print{.acoes{display:none}body{background:#fff}}
+    </style></head><body>
+      <header><div><h1>Controle de FVS · ${esc(CFG.obraNome)}</h1><p>${esc(R.subtitulo || '')}</p><p>Gerado pelo Prisma em ${new Date().toLocaleString('pt-BR')} a partir do SGQ</p></div><img src="${LOGO}" alt="Realiza Construtora"></header>
+      <main>
+        <div class="acoes"><button onclick="window.print()">Imprimir / salvar PDF</button></div>
+        <p class="tk">${G.total ? `<b>${pf(G.pct)}</b> das FVS estão encerradas.${pior && pior.sem ? ` O serviço com mais fichas sem iniciar é <b>${esc(pior.nome)}</b>, com <b>${nf(pior.sem)}</b>.` : ''}` : 'Nenhuma FVS no relatório.'}</p>
+        <section class="kpis">${kpi('', 'Total de FVS', nf(G.total), 'Linhas do Registro de FVS')}${kpi('ok', 'Encerradas', nf(G.enc), pf(G.total ? G.enc / G.total : 0) + ' do total')}${kpi('warn', 'Iniciadas', nf(G.ini), pf(G.total ? G.ini / G.total : 0) + ' do total')}${kpi('bad', 'Sem iniciar', nf(G.sem), pf(G.total ? G.sem / G.total : 0) + ' do total')}</section>
+        <div class="grid">
+          <section class="card"><h2>Resumo geral de FVS</h2><p class="nota">Encerrada, iniciada e sem iniciar.</p><div class="centro">${rosca}</div>${leg}</section>
+          <section class="card"><h2>Por bloco</h2><p class="nota">Situação das FVS em cada bloco ou torre.</p>${barras(D.blocos, 46, 420)}${leg}</section>
+          <section class="card w"><h2>Situação por serviço</h2><p class="nota">Da categoria com mais FVS para a com menos.</p>${leg}${barras(D.servicos, 26)}</section>
+          <section class="card w"><h2>Tabela por serviço</h2><table><tr><th>Serviço</th><th>Sem iniciar</th><th>Iniciada</th><th>Encerradas</th><th>Total</th><th>% encerradas</th></tr>${tabela}</table></section>
+        </div>
+        <div class="rod">Encerrada = verificação encerrada (inclui FVS finalizada) · Iniciada = verificação em andamento · Sem iniciar = sem ficha ou ficha criada sem itens. Mesma regra da planilha Controle de FVS.</div>
+      </main></body></html>`;
+  }
+  function abrirDashboard() {
+    if (!REL || !REL.linhas.length) return status('Gere o relatório primeiro.');
+    const w = window.open('', '_blank');
+    if (!w) return status('O navegador bloqueou a nova aba. Permita pop-ups para o SGQ e tente de novo.');
+    w.document.open(); w.document.write(dashboardHtml(REL)); w.document.close();
+    status('Dashboard aberto em outra aba. Lá tem o botão para imprimir ou salvar em PDF.');
+  }
+
   function planilhaXlsx(R) {
     const L = R.linhas.map(linhaPlanilha);
     const ppc = R.tipo === 'ppc';
@@ -1849,7 +1919,7 @@
 <cols><col min="1" max="1" width="31" customWidth="1"/><col min="2" max="2" width="12" customWidth="1"/><col min="3" max="3" width="15" customWidth="1"/><col min="4" max="4" width="13" customWidth="1"/></cols>
 <sheetData>${dRows.join('')}</sheetData><mergeCells count="5"><mergeCell ref="A1:O2"/><mergeCell ref="A5:D5"/><mergeCell ref="B6:D6"/><mergeCell ref="B7:D7"/><mergeCell ref="B8:D8"/></mergeCells>
 <pageMargins left="0.75" right="0.75" top="1" bottom="1" header="0.5" footer="0.5"/>${comGrafico ? '<drawing r:id="rId1"/>' : ''}</worksheet>`;
-    const desenho = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><xdr:twoCellAnchor><xdr:from><xdr:col>5</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>3</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:to><xdr:col>16</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>${Math.max(24, ultima + 3)}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to><xdr:graphicFrame macro=""><xdr:nvGraphicFramePr><xdr:cNvPr id="2" name="FVS por serviço"/><xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr><xdr:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/></xdr:xfrm><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="rId1"/></a:graphicData></a:graphic></xdr:graphicFrame><xdr:clientData/></xdr:twoCellAnchor></xdr:wsDr>`;
+    const desenho = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><xdr:twoCellAnchor><xdr:from><xdr:col>5</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>3</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:to><xdr:col>16</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>${Math.max(24, ultima + 3)}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to><xdr:graphicFrame macro=""><xdr:nvGraphicFramePr><xdr:cNvPr id="2" name="FVS por serviço"/><xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr><xdr:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/></xdr:xfrm><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="rId1"/></a:graphicData></a:graphic></xdr:graphicFrame><xdr:clientData/></xdr:twoCellAnchor><xdr:twoCellAnchor><xdr:from><xdr:col>17</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>3</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:to><xdr:col>25</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>22</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to><xdr:graphicFrame macro=""><xdr:nvGraphicFramePr><xdr:cNvPr id="3" name="Resumo Geral de FVS"/><xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr><xdr:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/></xdr:xfrm><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="rId2"/></a:graphicData></a:graphic></xdr:graphicFrame><xdr:clientData/></xdr:twoCellAnchor></xdr:wsDr>`;
     // Categorias de Serviços (listas das caixinhas de escolha)
     const colsCat = [['A', 'Categoria de Serviço', cats], ['C', 'Responsável', resp], ['E', 'Status', stats], ['G', 'Pavimento', pavs], ['I', 'BLOCO', blocos]];
     const maxN = Math.max(...colsCat.map((c) => c[2].length));
@@ -1876,7 +1946,7 @@
     const REL_NS = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
     const PKG = 'http://schemas.openxmlformats.org/package/2006/relationships';
     const arqs = [
-      ['[Content_Types].xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>${abas.map((a, i) => `<Override PartName="/xl/worksheets/sheet${i + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`).join('')}<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>${iDash >= 0 ? '<Override PartName="/xl/drawings/drawing1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/><Override PartName="/xl/charts/chart1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/>' : ''}</Types>`],
+      ['[Content_Types].xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>${abas.map((a, i) => `<Override PartName="/xl/worksheets/sheet${i + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`).join('')}<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>${iDash >= 0 ? '<Override PartName="/xl/drawings/drawing1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/><Override PartName="/xl/charts/chart1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/><Override PartName="/xl/charts/chart2.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/>' : ''}</Types>`],
       ['_rels/.rels', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="${PKG}"><Relationship Id="rId1" Type="${REL_NS}/officeDocument" Target="xl/workbook.xml"/></Relationships>`],
       ['xl/workbook.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook ${NS}><bookViews><workbookView/></bookViews><sheets>${abas.map((a, i) => `<sheet name="${xe(a.nome)}" sheetId="${i + 1}" r:id="rId${i + 1}"/>`).join('')}</sheets><definedNames><definedName name="_xlnm._FilterDatabase" localSheetId="${iReg}" hidden="1">'Registro de FVS'!$A$1:$G$${n}</definedName></definedNames><calcPr calcId="191029" fullCalcOnLoad="1"/></workbook>`],
       ['xl/_rels/workbook.xml.rels', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="${PKG}">${abas.map((a, i) => `<Relationship Id="rId${i + 1}" Type="${REL_NS}/worksheet" Target="worksheets/sheet${i + 1}.xml"/>`).join('')}<Relationship Id="rId${abas.length + 1}" Type="${REL_NS}/styles" Target="styles.xml"/></Relationships>`],
@@ -1886,8 +1956,8 @@
     if (iDash >= 0) arqs.push(
       [`xl/worksheets/_rels/sheet${iDash + 1}.xml.rels`, `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="${PKG}"><Relationship Id="rId1" Type="${REL_NS}/drawing" Target="../drawings/drawing1.xml"/></Relationships>`],
       ['xl/drawings/drawing1.xml', desenho],
-      ['xl/drawings/_rels/drawing1.xml.rels', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="${PKG}"><Relationship Id="rId1" Type="${REL_NS}/chart" Target="../charts/chart1.xml"/></Relationships>`],
-      ['xl/charts/chart1.xml', graficoXml(ultima)]);
+      ['xl/drawings/_rels/drawing1.xml.rels', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="${PKG}"><Relationship Id="rId1" Type="${REL_NS}/chart" Target="../charts/chart1.xml"/><Relationship Id="rId2" Type="${REL_NS}/chart" Target="../charts/chart2.xml"/></Relationships>`],
+      ['xl/charts/chart1.xml', graficoXml(ultima)], ['xl/charts/chart2.xml', pizzaXml()]);
     return zipStore(arqs);
   }
   function baixarPlanilha() {
