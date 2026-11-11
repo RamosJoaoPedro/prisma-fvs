@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Prisma - FVS no SGQ
 // @namespace    realiza-bot-fvs
-// @version      2.27
+// @version      2.28
 // @author       João Pedro Ramos
 // @description  Prisma: mapa das torres, fila de comandos, relatórios e preenchimento de FVS no SGQ da Realiza, com travas de segurança. Usa o login do próprio usuário no SGQ.
 // @match        https://gdol.sgq2.com.br/*
@@ -17,7 +17,7 @@
 
   // ============================== CONFIGURAÇÃO PADRÃO ==============================
   // Tudo aqui pode ser trocado pela aba "Configuração" do painel (fica salvo no navegador).
-  const VERSAO = '2.27';
+  const VERSAO = '2.28';
   const CANAL = 'teste'; // 'oficial' ou 'teste' (o arquivo prisma-teste.user.js usa 'teste')
   const PADRAO = {
     obraNome: '', idObra: null,
@@ -217,7 +217,8 @@
     if (!a) return;
     const S = await servicosDaArea(a.id);
     const fvs = {};
-    for (const x of S) { const c = codNorm(x.codigo); fvs[c] = [x.idObraChecklistServico, x.status, x.total, +(x.ir > 0), +(x.irep > 0)]; if (!NOMES[c]) NOMES[c] = (x.descricao || '').trim(); }
+    const peso = (e) => (e[1] === 1 ? 2 : e[2] > 0 ? 1 : 0);
+    for (const x of S) { const c = codNorm(x.codigo); const novo = [x.idObraChecklistServico, x.status, x.total, +(x.ir > 0), +(x.irep > 0)]; if (!fvs[c] || peso(novo) > peso(fvs[c]) || (peso(novo) === peso(fvs[c]) && novo[0] < fvs[c][0])) fvs[c] = novo; if (!NOMES[c]) NOMES[c] = (x.descricao || '').trim(); }
     const antes = MAPA.areas[a.nome];
     if (antes && antes.fvs) { // compara com a leitura anterior e registra o que mudou no SGQ
       const agora = new Date().toISOString(), recente = (cod) => HIST.some((x) => x.src === 'prisma' && x.a === a.nome && x.f === cod && Date.now() - new Date(x.q) < 15 * 60000);
@@ -490,11 +491,12 @@
     if (!a) return PEND('área não encontrada no SGQ');
     let fv = (await servicosDaArea(a.id)).filter((x) => codNorm(x.codigo) === t.fvs);
     if (!fv.length) return PEND('FVS não existe nessa área');
-    if (fv.length > 1) { // a mesma FVS cadastrada 2x na área: só segue se sobrar exatamente uma não finalizada
+    let dupNota = '';
+    if (fv.length > 1) { // a mesma FVS cadastrada 2x na área: escolhe a certa (veja escolherDuplicada)
       const nf = fv.filter((x) => x.status !== 1);
       if (!nf.length) return OK(`a FVS aparece ${fv.length} vezes na área e todas já estão finalizadas`);
-      if (nf.length > 1) return PEND(`a FVS aparece ${fv.length} vezes na área e ${nf.length} não estão finalizadas: conferir na tela qual é a certa`);
-      fv = nf;
+      if (nf.length > 1) { const e = await escolherDuplicada(nf); if (e.erro) return PEND(e.erro); fv = [e.x]; dupNota = e.motivo; }
+      else fv = nf;
     }
     const idS = fv[0].idObraChecklistServico;
 
@@ -541,7 +543,7 @@
       if (rr.resultado === 'PENDENTE') return PEND((alvos.length > 1 ? `verificação ${k + 1} de ${alvos.length}: ` : '') + rr.msg + (k && !simular ? ` (as ${k} anteriores já foram gravadas)` : ''));
       res.push(rr.msg);
     }
-    const junta = (alvos.length > 1 ? `${alvos.length} verificações abertas, todas tratadas: ` : '') + (() => { const c = new Map(); res.forEach((m) => c.set(m, (c.get(m) || 0) + 1)); return [...c].map(([m, n]) => n > 1 ? `${m} (×${n})` : m).join(' | '); })();
+    const junta = (dupNota ? dupNota + '; ' : '') + (alvos.length > 1 ? `${alvos.length} verificações abertas, todas tratadas: ` : '') + (() => { const c = new Map(); res.forEach((m) => c.set(m, (c.get(m) || 0) + 1)); return [...c].map(([m, n]) => n > 1 ? `${m} (×${n})` : m).join(' | '); })();
     if (comOc) return OK((simular ? 'SIMULAÇÃO: ' : '') + junta + ' · FVS fica aberta até a tratativa');
     if (simular) return OK('SIMULAÇÃO: ' + junta + (t.acao === 'fechar' ? ' e finalizaria' : ''));
     if (t.acao === 'abrir') return OK(junta);
@@ -661,6 +663,16 @@
   // Ação "Excluir" (ficha aberta sem querer): é a mesma lixeira da lista de verificações do SGQ. Por segurança só exclui
   // ficha ABERTA (não encerrada), sua (ou sem inspetor e em branco) e sem ocorrência; ficha encerrada e FVS finalizada
   // ficam como estão. Confere todas as fichas abertas do local antes de excluir qualquer uma.
+  // A mesma FVS cadastrada 2x (ou mais) na área e nenhuma finalizada: vale a que já tem ficha. Se nenhuma tem ficha
+  // (cadastro em dobro, as duas vazias), usa a primeira cadastrada (menor id), sempre a mesma, e a outra fica sem uso.
+  // Só para quando mais de uma já tem ficha: aí é preciso olhar na tela qual é a certa.
+  async function escolherDuplicada(nf) {
+    const com = [];
+    for (const x of nf) { const v = await listarVerif(x.idObraChecklistServico); if (v.length) com.push({ x, v }); }
+    if (com.length === 1) return { x: com[0].x, motivo: 'a FVS aparece ' + nf.length + ' vezes na área; usei a que já tem ficha' };
+    if (!com.length) return { x: nf.slice().sort((p, q) => p.idObraChecklistServico - q.idObraChecklistServico)[0], motivo: 'a FVS aparece ' + nf.length + ' vezes na área, todas sem ficha; usei a primeira cadastrada' };
+    return { erro: `a FVS aparece ${nf.length} vezes na área e ${com.length} já têm ficha: conferir na tela qual é a certa` };
+  }
   async function excluirFicha(t, simular) {
     const a = (await listarAreas()).find((x) => norm(x.nome) === norm(t.area));
     if (!a) return PEND('área não encontrada no SGQ');
@@ -668,8 +680,9 @@
     if (!fv.length) return PEND('FVS não existe nessa área');
     const nf = fv.filter((x) => x.status !== 1);
     if (!nf.length) return PEND('a FVS já está finalizada: o SGQ não deixa excluir a ficha dela');
-    if (nf.length > 1) return PEND(`a FVS aparece ${fv.length} vezes na área: conferir na tela do SGQ qual ficha excluir`);
-    const idS = nf[0].idObraChecklistServico;
+    let alvoS = nf[0];
+    if (nf.length > 1) { const e = await escolherDuplicada(nf); if (e.erro) return PEND(e.erro.replace('qual é a certa', 'qual ficha excluir')); alvoS = e.x; }
+    const idS = alvoS.idObraChecklistServico;
     const verifs = await listarVerif(idS);
     const abertas = verifs.filter((i) => i.status === 0 || i.status === 3);
     if (!abertas.length) return OK(verifs.length ? 'já não tinha ficha aberta (ficha encerrada não é excluída)' : 'já não tinha ficha');
