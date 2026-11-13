@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Prisma - FVS no SGQ
 // @namespace    realiza-bot-fvs
-// @version      2.28
+// @version      2.29
 // @author       João Pedro Ramos
 // @description  Prisma: mapa das torres, fila de comandos, relatórios e preenchimento de FVS no SGQ da Realiza, com travas de segurança. Usa o login do próprio usuário no SGQ.
 // @match        https://gdol.sgq2.com.br/*
@@ -17,7 +17,7 @@
 
   // ============================== CONFIGURAÇÃO PADRÃO ==============================
   // Tudo aqui pode ser trocado pela aba "Configuração" do painel (fica salvo no navegador).
-  const VERSAO = '2.28';
+  const VERSAO = '2.29';
   const CANAL = 'oficial'; // 'oficial' ou 'teste' (o arquivo prisma-teste.user.js usa 'teste')
   const PADRAO = {
     obraNome: '', idObra: null,
@@ -28,6 +28,7 @@
     descricaoPadrao: 'Item não conforme na 1ª inspeção: ',
     tratativaPadrao: 'Retrabalho executado e conferido na 2ª inspeção.',
     pausaMs: 400,
+    campoLocal: 1,         // em qual campo (1 a 4) da verificação do SGQ vai o local de uma nova verificação (ex.: PAREDE COZINHA)
     leiturasJuntas: 3,     // consultas ao SGQ ao mesmo tempo ao ler o mapa e os relatórios (gravação é sempre uma por vez)
   };
   // Gabarito de fábrica da obra 054 Varandas Carioca (vale só para ela). Itens NA por FVS (aptos / por torre / hall) e "pre" = até qual item marca ao ABRIR (pré-requisitos).
@@ -519,17 +520,22 @@
     const naTxt = g.na.length ? 'NA ' + g.na.join(', ') : 'sem NA';
 
     const comOc = !!(t.oc && t.oc.length);
+    const nova = !!(t.opc && t.opc.nova);
+    if (nova && V) return PEND(`já existe verificação aberta desta FVS (aberta em ${V.dataAbertura ? new Date(V.dataAbertura).toLocaleDateString('pt-BR') : '?'}): termine ou exclua essa antes de criar uma nova`);
     if (!V) {
-      if (verifs.length) {
+      if (verifs.length && !nova) {
         if (comOc) return PEND('a verificação desta FVS já está encerrada: a ocorrência não foi criada (registre pela tela do SGQ)');
         if (t.acao === 'abrir') return OK('já tinha verificação encerrada');
         if (fv[0].status === 1) return OK('já estava encerrada e finalizada');
         if (simular) return OK('SIMULAÇÃO: só finalizaria a FVS (verificação já encerrada)');
         return (await finalizarFvs(idS)) ? OK('verificação já estava encerrada; FVS finalizada') : PEND('erro ao finalizar a FVS');
       }
-      if (simular) return OK(`SIMULAÇÃO: criaria a ficha em ${fmt(t.dAbrir)}, ${comOc ? `${t.acao === 'abrir' ? `marcaria os itens 1 a ${g.pre}` : 'preencheria os itens'}, marcaria R e criaria ocorrência no ${t.oc.map((o) => 'item ' + o.item).join(', ')} e deixaria iniciada (sem encerrar)` : t.acao === 'abrir' ? `marcaria os itens 1 a ${g.pre} e deixaria iniciada` : `preencheria tudo e encerraria em ${fmt(t.dFechar)}`} (${naTxt})`);
-      const c = await api('POST', '/obras/inspecoes-obra/create', { idObraChecklistServico: idS, data: isoDia(t.dAbrir), campo1: null, campo2: null, campo3: null, campo4: null });
-      if (c.st !== 200) return PEND('erro ao criar verificação: ' + msgErro(c));
+      if (simular) return OK(`SIMULAÇÃO: ${nova ? `criaria uma NOVA verificação (local "${t.opc.local}"${verifs.length ? `, além das ${verifs.length} que já existem` : ''}) ` : 'criaria a ficha '}em ${fmt(t.dAbrir)}, ${comOc ? `${t.acao === 'abrir' ? `marcaria os itens 1 a ${g.pre}` : 'preencheria os itens'}, marcaria R e criaria ocorrência no ${t.oc.map((o) => 'item ' + o.item).join(', ')}${t.acao === 'fechar' && t.oc.every((o) => (o.tratativa || '').trim()) ? ' com tratativa, aprovaria a 2ª inspeção e encerraria em ' + fmt(t.dFechar) : ' e deixaria iniciada (sem encerrar)'}` : t.acao === 'abrir' ? `marcaria os itens 1 a ${g.pre} e deixaria iniciada` : `preencheria tudo e encerraria em ${fmt(t.dFechar)}`} (${naTxt})`);
+      const campos = { campo1: null, campo2: null, campo3: null, campo4: null };
+      if (nova && t.opc.local) campos['campo' + (+CFG.campoLocal || 1)] = t.opc.local;
+      const c = await api('POST', '/obras/inspecoes-obra/create', { idObraChecklistServico: idS, data: isoDia(t.dAbrir), ...campos });
+      if (c.st !== 200) return PEND((nova && fv[0].status === 1 ? 'o SGQ não deixou criar outra verificação com a FVS finalizada (reabra a FVS na tela do SGQ e rode de novo): ' : 'erro ao criar verificação: ') + msgErro(c));
+      if (nova) dupNota = (dupNota ? dupNota + '; ' : '') + `nova verificação "${t.opc.local}"`;
       verifs = await listarVerif(idS); abertas = verifs.filter((i) => i.status === 0 || i.status === 3);
       if (abertas.length !== 1) return PEND(`depois de criar apareceram ${abertas.length} verificações abertas: conferir`);
       V = abertas[0]; criada = true;
@@ -544,7 +550,8 @@
       res.push(rr.msg);
     }
     const junta = (dupNota ? dupNota + '; ' : '') + (alvos.length > 1 ? `${alvos.length} verificações abertas, todas tratadas: ` : '') + (() => { const c = new Map(); res.forEach((m) => c.set(m, (c.get(m) || 0) + 1)); return [...c].map(([m, n]) => n > 1 ? `${m} (×${n})` : m).join(' | '); })();
-    if (comOc) return OK((simular ? 'SIMULAÇÃO: ' : '') + junta + ' · FVS fica aberta até a tratativa');
+    const ocTratadas = comOc && t.acao === 'fechar' && t.oc.every((o) => (o.tratativa || '').trim());
+    if (comOc && !ocTratadas) return OK((simular ? 'SIMULAÇÃO: ' : '') + junta + ' · FVS fica aberta até a tratativa');
     if (simular) return OK('SIMULAÇÃO: ' + junta + (t.acao === 'fechar' ? ' e finalizaria' : ''));
     if (t.acao === 'abrir') return OK(junta);
     return (await finalizarFvs(idS)) ? OK(junta + ' e FVS finalizada') : PEND(junta + ', mas deu erro ao finalizar a FVS');
@@ -648,9 +655,13 @@
     // rodou de novo (ex.: o salvar falhou da outra vez): não cria a mesma ocorrência duas vezes
     const novas = alvo.filter(([oc, x]) => !ocs.some((o) => o.idInspecaoObraItens === x.idInspecaoObraItens && String(o.descricao || '').trim() === oc.texto.trim()));
     const txtItens = alvo.map(([oc]) => 'item ' + oc.item).join(', ');
+    // Todas com tratativa e ação Fechar: depois de criar as ocorrências já tratadas, aprova a 2ª inspeção e encerra pelo caminho normal.
+    const tratadas = alvo.every(([oc]) => (oc.tratativa || '').trim());
+    const fechaJunto = tratadas && t.acao === 'fechar';
+    if (simular && fechaJunto) return OK(`${assumidaDe ? 'assumiria a ficha de ' + assumidaDe + ', ' : ''}marcaria R e criaria ocorrência com tratativa no ${txtItens}, aprovaria a 2ª inspeção, preencheria ${preenchidos} itens e encerraria em ${fmt(t.dFechar)} (${naTxt})`);
     if (simular) return OK(`${assumidaDe ? 'assumiria a ficha de ' + assumidaDe + ', ' : ''}preencheria ${preenchidos} itens, marcaria R e criaria ocorrência no ${txtItens} e deixaria a ficha iniciada, sem encerrar (${naTxt})`);
     for (const [oc, x] of novas) {
-      const c = await api('POST', '/obras/inspecoes-obra/' + V.idInspecaoObra + '/ocorrencias/create', { idObra: CFG.idObra, idInspecaoObraItens: x.idInspecaoObraItens, inspecao: 1, descricao: oc.texto.trim(), dataDescricao: isoDia(dia), tratativa: null, dataTratativa: null });
+      const c = await api('POST', '/obras/inspecoes-obra/' + V.idInspecaoObra + '/ocorrencias/create', { idObra: CFG.idObra, idInspecaoObraItens: x.idInspecaoObraItens, inspecao: 1, descricao: oc.texto.trim(), dataDescricao: isoDia(dia), tratativa: (oc.tratativa || '').trim() || null, dataTratativa: (oc.tratativa || '').trim() ? isoDia(oc.dataTrat || t.dFechar || dia) : null });
       if (c.st !== 200) return PEND(`erro ao criar a ocorrência do item ${oc.item}: ${msgErro(c)}`);
     }
     for (const [, x] of alvo) { x.inspecao1 = 'R'; x.dataInspecao1 = isoItem(dia); }
@@ -658,6 +669,10 @@
     if (!s.ok) return PEND(`ocorrência criada (${txtItens}), mas o SGQ recusou salvar a ficha: ${s.msg}`);
     const dep = (await listarVerif(idS)).find((i) => i.idInspecaoObra === V.idInspecaoObra);
     if (!dep || dep.status !== 3) return PEND('ocorrência criada, mas confira a ficha na tela (status ' + (dep ? dep.status : '?') + ')');
+    if (fechaJunto) {
+      const r2 = await processarVerif({ ...t, oc: [], opc: { ...t.opc, segunda: true } }, g, dep, false, false, naTxt, idS);
+      return r2.resultado === 'OK' ? OK(`ocorrência com tratativa criada no ${txtItens}; ${r2.msg}`) : PEND(`ocorrência com tratativa criada no ${txtItens}, mas não encerrou: ${r2.msg}`);
+    }
     return OK(`${assumidaDe ? 'assumida de ' + assumidaDe + '; ' : ''}ocorrência criada no ${txtItens} (item marcado R); ficha iniciada, não encerrada até a tratativa`);
   }
   // Ação "Excluir" (ficha aberta sem querer): é a mesma lixeira da lista de verificações do SGQ. Por segurança só exclui
@@ -938,14 +953,14 @@
     root.classList.toggle('dark', !!CFG.escuro);
     root.innerHTML = `
       <div class="top"><div class="marca">${(() => { const t = Date.now() - GIRA; return t < 700 ? `<span class="ic gira" style="--d:-${t}ms"></span>` : '<span class="ic"></span>'; })()}<span><b>Prisma</b><small>FVS · ${esc(CFG.obraNome)}</small></span></div>
-        <div class="tabs">${[['mapa', 'Mapa'], ['fila', `Fila (${nFila})`], ['rel', 'Relatório/Qualidade'], ['hist', 'Histórico'], ['gab', 'Gabaritos'], ['cfg', 'Configuração']].map(([k, t]) => `<button data-aba="${k}" class="${S.aba === k ? 'on' : ''}">${t}</button>`).join('')}</div>
+        <div class="tabs">${[['mapa', 'Mapa'], ['fila', `Fila (${nFila})`], ['rel', 'Relatório/Qualidade'], ['ficha', 'Ficha'], ['hist', 'Histórico'], ['gab', 'Gabaritos'], ['cfg', 'Configuração']].map(([k, t]) => `<button data-aba="${k}" class="${S.aba === k ? 'on' : ''}">${t}</button>`).join('')}</div>
         <button class="x" id="bf2-x">Fechar</button></div>
       ${avisoHtml()}<div class="body" id="bf2-body"></div>
       <div class="foot"><span class="msg" id="bf2-status">${esc(STATUS)}</span><span class="assin">Prisma v${VERSAO}${CANAL === 'teste' ? ' (TESTE)' : ''} · criado por João Pedro Ramos</span></div>`;
     root.querySelectorAll('[data-aba]').forEach((b) => b.onclick = () => { if (!configurado() && b.dataset.aba !== 'cfg') return status('Termine a configuração inicial primeiro.'); S.aba = b.dataset.aba; salvarTela(); render(); });
     if (!configurado()) S.aba = 'cfg';
     $('#bf2-x').onclick = fechaPainel;
-    ({ mapa: renderMapa, fila: renderFila, rel: renderRel, hist: renderHist, gab: renderGab, cfg: renderCfg })[S.aba]();
+    ({ mapa: renderMapa, fila: renderFila, rel: renderRel, ficha: renderFicha, hist: renderHist, gab: renderGab, cfg: renderCfg })[S.aba]();
   }
 
   // ------------------------------ aba MAPA ------------------------------
@@ -1005,6 +1020,8 @@
         ${S.acao === 'fechar' ? `<label>Data de fechamento<input type="date" id="m-dF" value="${esc(S.dFechar)}" max="${hojeStr()}"></label>` : ''}
         ${S.acao === 'fechar' ? `<label class="chk"><input type="checkbox" id="m-seg" ${S.segunda ? 'checked' : ''}> Aprovar 2ª inspeção de itens R/X</label>
         ${S.segunda ? `<label>Tratativa (vazio = padrão)<input id="m-trat" value="${esc(S.tratativa)}" placeholder="${esc(CFG.tratativaPadrao)}"></label>` : ''}` : ''}
+        ${S.acao !== 'excluir' ? `<label class="chk"><input type="checkbox" id="m-nova" ${S.nova ? 'checked' : ''}> Nova verificação (a FVS já tem ficha)</label>
+        ${S.nova ? `<label>Local da nova verificação<input id="m-nlocal" value="${esc(S.nlocal || '')}" placeholder="ex.: PAREDE COZINHA"></label><div class="muted" style="font-size:11px">Cria outra verificação na mesma FVS, mesmo que já exista uma encerrada, e escreve esse local nela. Depois abre ou fecha pelo gabarito, como sempre.</div>` : ''}` : ''}
         ${S.acao !== 'excluir' ? `<label class="chk"><input type="checkbox" id="m-ass" ${S.assumir ? 'checked' : ''}> Assumir fichas de: ${CFG.exFuncionarios.length ? esc(CFG.exFuncionarios.map((n) => n.split(/\s+/).slice(0, 2).join(' ')).join(', ')) : '<span class="muted">ninguém (Configuração)</span>'}</label>` : ''}
         ${avisoGab}
         <button class="b p" id="m-add" ${!S.sel.length || (S.acao !== 'excluir' && (!g || (S.acao === 'abrir' && !g.pre))) ? 'disabled' : ''}>Adicionar à fila: ${S.acao} ${S.sel.length} local(is)</button>
@@ -1030,6 +1047,8 @@
     on('#m-dA', 'onchange', (e) => { S.dAbrir = e.target.value; if (S.dFechar < S.dAbrir) S.dFechar = S.dAbrir; salvarTela(); renderMapa(); });
     on('#m-dF', 'onchange', (e) => { S.dFechar = e.target.value; salvarTela(); });
     on('#m-seg', 'onchange', (e) => { S.segunda = e.target.checked; salvarTela(); renderMapa(); });
+    on('#m-nova', 'onchange', (e) => { S.nova = e.target.checked; salvarTela(); renderMapa(); });
+    on('#m-nlocal', 'onchange', (e) => { S.nlocal = e.target.value.trim().toUpperCase(); salvarTela(); });
     on('#m-trat', 'onchange', (e) => { S.tratativa = e.target.value; salvarTela(); });
     on('#m-ass', 'onchange', (e) => { S.assumir = e.target.checked; salvarTela(); });
     on('#m-limpa', 'onclick', () => { S.sel = []; renderMapa(); });
@@ -1089,7 +1108,9 @@
     on('#m-atu', 'onclick', async () => { if (ocupado()) return; PARAR = false; try { await atualizarTorre(T); } catch (e) { status('Erro: ' + e.message); } renderMapa(); });
     on('#m-add', 'onclick', () => {
       if (S.acao === 'fechar' && S.dAbrir > S.dFechar) return status('A data de abertura não pode ser depois da de fechamento.');
-      FILA.push({ id: Date.now(), fvs: S.serv, acao: S.acao, areas: [...S.sel].sort((a, b) => a.localeCompare(b, 'pt', { numeric: true })), dAbrir: S.dAbrir, dFechar: S.acao === 'fechar' ? S.dFechar : S.dAbrir, opc: S.acao === 'excluir' ? {} : { assumir: S.assumir, segunda: S.acao === 'fechar' && S.segunda, tratativa: S.segunda ? S.tratativa : '' } });
+      const nl = ($('#m-nlocal') || {}).value; if (nl != null) S.nlocal = nl.trim().toUpperCase();
+      if (S.acao !== 'excluir' && S.nova && !S.nlocal) return status('Escreva o local da nova verificação (ex.: PAREDE COZINHA) ou desmarque "Nova verificação".');
+      FILA.push({ id: Date.now(), fvs: S.serv, acao: S.acao, areas: [...S.sel].sort((a, b) => a.localeCompare(b, 'pt', { numeric: true })), dAbrir: S.dAbrir, dFechar: S.acao === 'fechar' ? S.dFechar : S.dAbrir, opc: S.acao === 'excluir' ? {} : { assumir: S.assumir, segunda: S.acao === 'fechar' && S.segunda, tratativa: S.segunda ? S.tratativa : '', nova: !!S.nova, local: S.nova ? S.nlocal : '' } });
       salvarFila(); status(`Adicionado à fila: ${S.acao} ${S.sel.length} local(is) de ${S.serv}.`); S.sel = []; render();
     });
     // clicar ou arrastar: o primeiro quadradinho decide se o arrasto marca ou desmarca
@@ -1184,11 +1205,13 @@
     const m = document.createElement('div'); m.className = 'modal'; m.id = 'oc-m';
     m.innerHTML = `<div class="card topo" role="dialog" aria-modal="true" aria-label="Criar ocorrência">
       <div class="row" style="justify-content:space-between"><h4>Criar ocorrência</h4><button class="xm" id="oc-x" title="Fechar sem salvar">×</button></div>
-      <div class="nota">Quando a fila rodar, o Prisma marca o item como <b>R</b>, cria a ocorrência <b>sem tratativa</b> e deixa a ficha <b>iniciada</b>: o SGQ não deixa encerrar até alguém fazer a tratativa.</div>
+      <div class="nota">Quando a fila rodar, o Prisma marca o item como <b>R</b> e cria a ocorrência. <b>Sem tratativa</b>, a ficha fica <b>iniciada</b> (o SGQ não encerra até alguém tratar). <b>Com tratativa</b> e a ação da fila em <b>Fechar</b>, o Prisma grava a tratativa, aprova a 2ª inspeção do item e encerra a ficha.</div>
       <label>Apartamento (só os que estão na fila)<input id="oc-qa" type="search" placeholder="buscar: 401, hall 3, bloco 02…"><select id="oc-a" size="6"></select></label>
       <label>Serviço (só os deste local na fila)<input id="oc-qs" type="search" placeholder="buscar serviço…"><select id="oc-s" size="4"></select></label>
       <label>Item da ficha<select id="oc-i" disabled><option>Escolha o apartamento e o serviço</option></select></label>
       <label>O que foi encontrado<textarea id="oc-t" style="min-height:80px;font:inherit" placeholder="ex.: choco encontrado na sala e na cozinha"></textarea></label>
+      <label>Tratativa (opcional)<textarea id="oc-tr" style="min-height:60px;font:inherit" placeholder="ex.: refeito o reboco e conferido na 2ª inspeção"></textarea></label>
+      <label style="max-width:220px">Data da tratativa<input type="date" id="oc-dt" max="${hojeStr()}"></label>
       <div class="row"><button class="b p" id="oc-ok" disabled>Salvar ocorrência</button><button class="b" id="oc-c">Cancelar</button><span class="muted" id="oc-msg"></span></div></div>`;
     root.appendChild(m);
     const q = (s) => m.querySelector(s), msg = (t) => { q('#oc-msg').textContent = t; };
@@ -1224,7 +1247,9 @@
       const item = +q('#oc-i').value, texto = q('#oc-t').value.trim(); if (!M.area || !M.cod || !item || !texto) return;
       const g = FILA.find((x) => x.fvs === M.cod && x.areas.includes(M.area)); if (!g) return msg('Esse local saiu da fila.');
       const it = (M.itens || []).find((x) => x.o === item) || {};
-      g.oc = (g.oc || []).filter((o) => !(o.area === M.area && o.item === item)).concat({ id: Date.now(), area: M.area, item, itemDesc: it.d || '', texto });
+      const tratativa = q('#oc-tr').value.trim(), dataTrat = q('#oc-dt').value || '';
+      if (dataTrat && !tratativa) return msg('Escreva a tratativa ou apague a data.');
+      g.oc = (g.oc || []).filter((o) => !(o.area === M.area && o.item === item)).concat({ id: Date.now(), area: M.area, item, itemDesc: it.d || '', texto, tratativa, dataTrat });
       salvarFila(); fecha(); status(`Ocorrência guardada na fila: ${localComTorre(M.area)} · ${M.cod} · item ${item}. Ela é criada no SGQ quando a fila rodar.`); render();
     };
     setTimeout(() => q('#oc-qa').focus(), 0);
@@ -1240,8 +1265,8 @@
         ${FILA.map((g) => `<tr><td><b>${esc(g.fvs)}</b><br><span class="muted">${esc(nomeLimpo(g.fvs))}</span></td><td${g.acao === 'excluir' ? ' style="color:var(--verm);font-weight:700"' : ''}>${NOME_ACAO[g.acao]}</td>
           <td>${g.acao === 'excluir' ? 'ficha aberta' : g.acao === 'abrir' ? 'abre ' + fmt(g.dAbrir) : 'abre ' + fmt(g.dAbrir) + '<br>fecha ' + fmt(g.dFechar)}</td>
           <td>${g.areas.map((a) => esc(localComTorre(a))).join(', ')}</td>
-          <td class="muted">${[g.opc && g.opc.assumir ? 'assume fichas da lista' : '', g.opc && g.opc.segunda ? '2ª inspeção' + (g.opc.tratativa ? ': "' + esc(g.opc.tratativa) + '"' : '') : '', g.na ? 'gabarito do roteiro' : ''].filter(Boolean).join('<br>')}
-            ${(g.oc || []).map((o) => `<div style="color:var(--verm)">ocorrência · ${esc(localCurto(o.area))} · item ${o.item}: "${esc(o.texto.length > 60 ? o.texto.slice(0, 60) + '…' : o.texto)}" <a href="#" data-ocdel="${g.id}|${o.id}" style="color:var(--muted)">tirar</a></div>`).join('')}</td>
+          <td class="muted">${[g.opc && g.opc.nova ? 'nova verificação: ' + esc(g.opc.local || '') : '', g.opc && g.opc.assumir ? 'assume fichas da lista' : '', g.opc && g.opc.segunda ? '2ª inspeção' + (g.opc.tratativa ? ': "' + esc(g.opc.tratativa) + '"' : '') : '', g.na ? 'gabarito do roteiro' : ''].filter(Boolean).join('<br>')}
+            ${(g.oc || []).map((o) => `<div style="color:var(--verm)">ocorrência · ${esc(localCurto(o.area))} · item ${o.item}: "${esc(o.texto.length > 60 ? o.texto.slice(0, 60) + '…' : o.texto)}"${o.tratativa ? ' · tratativa: "' + esc(o.tratativa.length > 40 ? o.tratativa.slice(0, 40) + '…' : o.tratativa) + '"' : ''} <a href="#" data-ocdel="${g.id}|${o.id}" style="color:var(--muted)">tirar</a></div>`).join('')}</td>
           <td><button class="b" data-del="${g.id}" ${RODANDO ? 'disabled' : ''}>Tirar</button></td></tr>`).join('')}</table>` : '<div class="muted">A fila está vazia. Monte no Mapa.</div>'}
       <div class="row">
         <button class="b" id="f-sim" ${FILA.length && !RODANDO ? '' : 'disabled'}>Simular (não grava)</button>
@@ -1321,6 +1346,135 @@
     }
     const ok = RESULT.filter((x) => x.resultado === 'OK').length;
     status(`${simular ? 'Simulação' : 'Execução'} terminada: ${ok} OK, ${RESULT.length - ok} pendente(s).${simular ? ' Nada foi gravado.' : ' O que deu OK saiu da fila; o pendente ficou nela.'}`);
+  }
+
+  // ------------------------------ aba FICHA ------------------------------
+  // Mostra uma FVS de um local como está no SGQ: cada verificação, item por item (1ª e 2ª inspeção) e as ocorrências.
+  // Deixa editar ocorrência (descrição, tratativa e data) e, em verificação ABERTA que seja sua (ou sem inspetor, ou de
+  // alguém da lista "Assumir fichas de"), trocar a marcação dos itens e criar ocorrência nova. Cada gravação pede confirmação.
+  let FICHA = null; // { area, cod, idS, L: [{ v, det, itens, ocs }] }
+  const ST_VERIF = { 0: 'Aberta (sem itens)', 3: 'Iniciada', 1: 'Encerrada', 2: 'Encerrada' };
+  const dataBR = (s) => (s ? new Date(s).toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' }) : '');
+  const dataInput = (s) => { if (!s) return ''; const d = new Date(s); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
+  async function lerFicha(area, cod) {
+    const a = (await listarAreas()).find((x) => norm(x.nome) === norm(area));
+    if (!a) throw new Error('não achei esse local no SGQ');
+    const fv = (await servicosDaArea(a.id)).filter((x) => codNorm(x.codigo) === cod);
+    if (!fv.length) throw new Error(cod + ' não existe nesse local');
+    const L = [];
+    for (const f of fv) {
+      for (const v of await listarVerif(f.idObraChecklistServico)) {
+        const det = ((await api('GET', '/obras/inspecoes-obra/' + v.idInspecaoObra)).j || {}).item || {};
+        const itens = (((await api('POST', '/obras/inspecoes-obra/' + v.idInspecaoObra + '/items', { page: 1, rowsPerPage: 300 })).j || {}).items || []).sort((p, q) => parseInt(p.ordem, 10) - parseInt(q.ordem, 10));
+        const ocs = ((await api('POST', '/obras/inspecoes-obra/' + v.idInspecaoObra + '/ocorrencias', { page: 1, rowsPerPage: 200 })).j || {}).items || [];
+        L.push({ v, det, itens, ocs, idS: f.idObraChecklistServico, fvsFin: f.status === 1 });
+      }
+    }
+    L.sort((x, y) => String(y.v.dataAbertura).localeCompare(String(x.v.dataAbertura)));
+    return { area: a.nome, cod, L };
+  }
+  const podeEditar = (r) => [0, 3].includes(r.v.status) && (!r.det.idFuncionarioInspecionado || r.det.idFuncionarioInspecionado === CFG.idInspecionado || podeAssumir(r.det.funcionarioInspecionado || ''));
+  const antesDeGravar = async () => { await lerAviso(true); const b = bloqueio(); if (b) { status(b); return false; } if (!sessaoDaTela()) { status('Clique em qualquer menu do SGQ e espere carregar: o Prisma usa a mesma sessão da tela.'); return false; } return true; };
+  function renderFicha() {
+    const body = $('#bf2-body');
+    const locais = [...new Set([...Object.keys(MAPA.areas), ...((AREAS || []).map((a) => a.nome))])].sort((a, b) => a.localeCompare(b, 'pt', { numeric: true })).slice(0, 1500);
+    const area = S.fArea || '', aMap = MAPA.areas[area];
+    const cods = (aMap ? Object.keys(aMap.fvs) : servicosDisponiveis()).sort((a, b) => a.localeCompare(b, 'pt', { numeric: true }));
+    const F = FICHA && FICHA.area === area && FICHA.cod === S.fCod ? FICHA : null;
+    const ocDo = (r, x) => r.ocs.filter((o) => o.idInspecaoObraItens === x.idInspecaoObraItens);
+    const verifHtml = (r, k) => {
+      const ed = podeEditar(r), campos = [1, 2, 3, 4].map((n) => r.det['campo' + n] || r.v['campo' + n]).filter(Boolean);
+      const opc = (val) => ['', 'A', 'N', 'R', 'X'].map((o) => `<option value="${o}" ${String(val || '') === o ? 'selected' : ''}>${o === '' ? '—' : o === 'N' ? 'NA' : o}</option>`).join('');
+      return `<div class="card" style="margin-top:12px">
+        <div class="row" style="justify-content:space-between"><h4>Verificação ${F.L.length - k} · ${esc(ST_VERIF[r.v.status] || 'status ' + r.v.status)}${r.fvsFin ? ' · FVS finalizada' : ''}</h4>
+          <span class="muted">aberta ${esc(dataBR(r.v.dataAbertura))}${r.v.dataEncerramento ? ' · encerrada ' + esc(dataBR(r.v.dataEncerramento)) : ''} · ${esc((r.det.funcionarioInspecionado || 'sem inspetor').trim())}${campos.length ? ' · local: ' + esc(campos.join(' / ')) : ''} · ${totalPreenchido(r.v)}/${r.v.totalItens} itens</span></div>
+        ${ed ? '' : `<div class="muted">${[0, 3].includes(r.v.status) ? 'Aberta por outra pessoa: só leitura (coloque o nome em Configuração → Assumir fichas de para poder mexer).' : 'Verificação encerrada: os itens ficam só para leitura; as ocorrências podem ser editadas.'}</div>`}
+        <div style="overflow:auto"><table><tr><th>Nº</th><th>Item</th><th>1ª insp.</th><th>Data</th><th>2ª insp.</th><th>Data</th><th>Ocorrência</th></tr>
+        ${r.itens.map((x) => { const oc = ocDo(r, x); return `<tr class="${['R', 'X'].includes(x.inspecao1) && x.inspecao2 !== 'A' ? 'pend' : ''}"><td><b>${parseInt(x.ordem, 10)}</b></td><td>${esc((x.descricao || '').trim())}</td>
+          <td>${ed && !x.inspecao2 ? `<select data-fi="${k}|${x.idInspecaoObraItens}" style="width:auto">${opc(x.inspecao1)}</select>` : esc(x.inspecao1 === 'N' ? 'NA' : x.inspecao1 || '—')}</td><td>${esc(dataBR(x.dataInspecao1))}</td>
+          <td>${esc(x.inspecao2 === 'N' ? 'NA' : x.inspecao2 || '')}</td><td>${esc(dataBR(x.dataInspecao2))}</td><td>${oc.length ? `<span style="color:var(--verm)">${oc.length} ocorrência(s)</span>` : ''}</td></tr>`; }).join('')}</table></div>
+        ${ed ? `<div class="row"><label style="max-width:200px">Data das marcações trocadas<input type="date" id="fi-d-${k}" value="${hojeStr()}" max="${hojeStr()}"></label><button class="b p" data-fsalva="${k}">Salvar itens</button><span class="muted">Grava só a marcação dos itens; a ficha continua aberta.</span></div>` : ''}
+        <h4>Ocorrências (${r.ocs.length})</h4>
+        ${r.ocs.length ? r.ocs.map((o, j) => { const it = r.itens.find((x) => x.idInspecaoObraItens === o.idInspecaoObraItens) || {};
+          return `<div style="border:1px solid var(--line);border-radius:8px;padding:8px;display:grid;gap:6px"><b>Item ${parseInt(it.ordem, 10) || '?'} · ${esc(((it.descricao || '').trim()).slice(0, 90))}</b>
+            <label>Descrição (${esc(dataBR(o.data || o.dataDescricao))})<textarea data-fod="${k}|${j}" style="min-height:50px;font:inherit">${esc(o.descricao || '')}</textarea></label>
+            <label>Tratativa<textarea data-fot="${k}|${j}" style="min-height:50px;font:inherit" placeholder="ainda sem tratativa">${esc(o.tratativa || '')}</textarea></label>
+            <div class="row"><label style="max-width:200px">Data da tratativa<input type="date" data-fodt="${k}|${j}" value="${esc(dataInput(o.dataTratativa))}" max="${hojeStr()}"></label><button class="b p" data-fosalva="${k}|${j}">Salvar ocorrência</button></div></div>`; }).join('') : '<div class="muted">Nenhuma ocorrência nesta verificação.</div>'}
+        ${ed ? `<details><summary>Criar ocorrência nesta verificação</summary><div style="display:grid;gap:6px;margin-top:6px">
+          <label>Item<select id="fn-i-${k}"><option value="">Escolha o item…</option>${r.itens.filter((x) => !x.inspecao2).map((x) => `<option value="${x.idInspecaoObraItens}">${parseInt(x.ordem, 10)} · ${esc(((x.descricao || '').trim()).slice(0, 80))}</option>`).join('')}</select></label>
+          <label>O que foi encontrado<textarea id="fn-t-${k}" style="min-height:50px;font:inherit"></textarea></label>
+          <label>Tratativa (opcional)<textarea id="fn-tr-${k}" style="min-height:50px;font:inherit"></textarea></label>
+          <div class="row"><label style="max-width:200px">Data<input type="date" id="fn-d-${k}" value="${hojeStr()}" max="${hojeStr()}"></label><button class="b p" data-fnova="${k}">Criar ocorrência</button><span class="muted">Marca o item como R e deixa a ficha iniciada.</span></div></div></details>` : ''}
+      </div>`;
+    };
+    body.innerHTML = `<div class="card topo" style="max-width:1100px"><h4>Ficha</h4>
+      <div class="nota">Veja como a FVS está preenchida no SGQ, item por item, e as ocorrências. Dá para editar ocorrência e, em ficha aberta sua, trocar a marcação dos itens. Nada é gravado sem você clicar em Salvar.</div>
+      <div class="row"><label style="flex:1;min-width:220px">Local<input id="f-a" list="f-locais" value="${esc(area)}" placeholder="ex.: BLOCO 01 - APTO 101"></label>
+        <label style="flex:1;min-width:220px">FVS<select id="f-c"><option value="">Escolha a FVS…</option>${cods.map((c) => `<option value="${esc(c)}" ${c === S.fCod ? 'selected' : ''}>${esc(c)} · ${esc(nomeLimpo(c))}</option>`).join('')}</select></label>
+        <button class="b p" id="f-ler" ${area && S.fCod ? '' : 'disabled'}>Ler no SGQ</button></div>
+      <datalist id="f-locais">${locais.map((n) => `<option value="${esc(n)}">`).join('')}</datalist>
+      ${F ? (F.L.length ? F.L.map(verifHtml).join('') : '<div class="muted">Essa FVS ainda não tem nenhuma verificação nesse local.</div>') : '<div class="muted">Escolha o local e a FVS e clique em Ler no SGQ.</div>'}</div>`;
+    const ler = async () => {
+      if (ocupado()) return; LENDO = true; status('Lendo a ficha no SGQ...');
+      try { FICHA = await lerFicha(S.fArea, S.fCod); S.fArea = FICHA.area; status(`${FICHA.cod} · ${localComTorre(FICHA.area)}: ${FICHA.L.length} verificação(ões).`); } catch (e) { FICHA = null; status('Não consegui ler: ' + e.message); }
+      LENDO = false; renderFicha();
+    };
+    $('#f-a').onchange = (e) => { S.fArea = e.target.value.trim(); FICHA = null; salvarTela(); setTimeout(renderFicha, 0); }; // depois do blur: redesenhar no meio dele quebrava a tela
+    $('#f-c').onchange = (e) => { S.fCod = e.target.value; FICHA = null; salvarTela(); setTimeout(renderFicha, 0); };
+    $('#f-ler').onclick = ler;
+    if (!F) return;
+    body.querySelectorAll('[data-fsalva]').forEach((b) => b.onclick = async () => {
+      const k = +b.dataset.fsalva, r = F.L[k]; const dia = $('#fi-d-' + k).value || hojeStr();
+      const mud = [];
+      body.querySelectorAll(`[data-fi^="${k}|"]`).forEach((sel) => { const id = +sel.dataset.fi.split('|')[1]; const x = r.itens.find((i) => i.idInspecaoObraItens === id); if (x && String(x.inspecao1 || '') !== sel.value) mud.push([x, sel.value]); });
+      if (!mud.length) return status('Nenhum item foi trocado.');
+      if (!confirm(`Gravar no SGQ ${mud.length} item(ns) de ${F.cod} em ${F.area}?\n\n${mud.map(([x, v]) => `• item ${parseInt(x.ordem, 10)}: ${x.inspecao1 || '—'} → ${v || '—'}`).join('\n')}`)) return;
+      if (ocupado() || !(await antesDeGravar())) return;
+      LENDO = true; status('Gravando os itens...');
+      try {
+        mud.forEach(([x, v]) => { x.inspecao1 = v; x.dataInspecao1 = v ? isoItem(dia) : null; });
+        const sv = await salvarFicha(r.v.idInspecaoObra, 3, r.itens, null);
+        if (!sv.ok) throw new Error('o SGQ recusou: ' + sv.msg);
+        HIST.push({ q: new Date().toISOString(), a: F.area, f: F.cod, ac: 'editar itens', r: 'OK', d: mud.map(([x, v]) => `item ${parseInt(x.ordem, 10)}=${v || '—'}`).join(', '), src: 'prisma', u: CFG.nomeInspecionado }); salvarHist();
+        FICHA = await lerFicha(F.area, F.cod); status('Itens gravados no SGQ.');
+      } catch (e) { status('Não gravei: ' + e.message); try { FICHA = await lerFicha(F.area, F.cod); } catch (e2) {} }
+      LENDO = false; renderFicha();
+    });
+    body.querySelectorAll('[data-fosalva]').forEach((b) => b.onclick = async () => {
+      const [k, j] = b.dataset.fosalva.split('|').map(Number), r = F.L[k], o = r.ocs[j];
+      const desc = body.querySelector(`[data-fod="${k}|${j}"]`).value.trim(), trat = body.querySelector(`[data-fot="${k}|${j}"]`).value.trim(), dt = body.querySelector(`[data-fodt="${k}|${j}"]`).value;
+      if (!desc) return status('A descrição da ocorrência não pode ficar vazia.');
+      if (trat && !dt) return status('Coloque a data da tratativa.');
+      if (!confirm(`Gravar no SGQ a ocorrência de ${F.cod} em ${F.area}?\n\nDescrição: ${desc}\nTratativa: ${trat || '(sem tratativa)'}${trat ? '\nData da tratativa: ' + fmt(dt) : ''}`)) return;
+      if (ocupado() || !(await antesDeGravar())) return;
+      LENDO = true; status('Gravando a ocorrência...');
+      try {
+        const u = await api('POST', '/obras/inspecoes-obra/' + r.v.idInspecaoObra + '/ocorrencias/update', { idObra: CFG.idObra, idInformacoesInspecaoObra: o.idInformacoesInspecaoObra, idInspecaoObraItens: o.idInspecaoObraItens, inspecao: o.inspecaoValue || 1, descricao: desc, dataDescricao: o.data || o.dataDescricao, tratativa: trat || null, dataTratativa: trat ? isoDia(dt) : null });
+        if (u.st !== 200) throw new Error('o SGQ recusou: ' + msgErro(u));
+        HIST.push({ q: new Date().toISOString(), a: F.area, f: F.cod, ac: 'editar ocorrência', r: 'OK', d: trat ? 'tratativa: ' + trat : 'descrição alterada', src: 'prisma', u: CFG.nomeInspecionado }); salvarHist();
+        FICHA = await lerFicha(F.area, F.cod); status('Ocorrência gravada no SGQ.');
+      } catch (e) { status('Não gravei: ' + e.message); }
+      LENDO = false; renderFicha();
+    });
+    body.querySelectorAll('[data-fnova]').forEach((b) => b.onclick = async () => {
+      const k = +b.dataset.fnova, r = F.L[k];
+      const id = +$('#fn-i-' + k).value, texto = $('#fn-t-' + k).value.trim(), trat = $('#fn-tr-' + k).value.trim(), dia = $('#fn-d-' + k).value || hojeStr();
+      const x = r.itens.find((i) => i.idInspecaoObraItens === id);
+      if (!x || !texto) return status('Escolha o item e escreva o que foi encontrado.');
+      if (!confirm(`Criar no SGQ uma ocorrência no item ${parseInt(x.ordem, 10)} de ${F.cod} em ${F.area}?\n\n${texto}${trat ? '\nTratativa: ' + trat : ''}\n\nO item fica marcado como R e a ficha continua iniciada.`)) return;
+      if (ocupado() || !(await antesDeGravar())) return;
+      LENDO = true; status('Criando a ocorrência...');
+      try {
+        const c = await api('POST', '/obras/inspecoes-obra/' + r.v.idInspecaoObra + '/ocorrencias/create', { idObra: CFG.idObra, idInspecaoObraItens: x.idInspecaoObraItens, inspecao: 1, descricao: texto, dataDescricao: isoDia(dia), tratativa: trat || null, dataTratativa: trat ? isoDia(dia) : null });
+        if (c.st !== 200) throw new Error('o SGQ recusou a ocorrência: ' + msgErro(c));
+        x.inspecao1 = 'R'; x.dataInspecao1 = isoItem(dia);
+        const sv = await salvarFicha(r.v.idInspecaoObra, 3, r.itens, null);
+        if (!sv.ok) throw new Error('ocorrência criada, mas o SGQ recusou marcar o item como R: ' + sv.msg);
+        HIST.push({ q: new Date().toISOString(), a: F.area, f: F.cod, ac: 'criar ocorrência', r: 'OK', d: `item ${parseInt(x.ordem, 10)}: ${texto}`, src: 'prisma', u: CFG.nomeInspecionado }); salvarHist();
+        FICHA = await lerFicha(F.area, F.cod); status('Ocorrência criada no SGQ.');
+      } catch (e) { status('Erro: ' + e.message); try { FICHA = await lerFicha(F.area, F.cod); } catch (e2) {} }
+      LENDO = false; renderFicha();
+    });
   }
 
   // ------------------------------ aba GABARITOS ------------------------------
@@ -1563,6 +1717,9 @@
     if (h.src === 'sgq') return { finalizada: 'Finalizada', iniciada: 'Iniciada', reaberta: 'Voltou a ficar aberta', nova: 'FVS nova no local', zerada: 'Itens apagados' }[h.ev] || h.ev;
     if (h.r !== 'OK') return 'Pendente';
     if (h.ac === 'criar local') return 'Local criado';
+    if (h.ac === 'editar itens') return 'Itens editados';
+    if (h.ac === 'editar ocorrência') return 'Ocorrência editada';
+    if (h.ac === 'criar ocorrência') return 'Ocorrência criada';
     if (h.ac === 'excluir') return /^já/.test(h.d || '') ? 'Já não tinha ficha aberta' : 'Ficha excluída';
     if (/^(já|a FVS aparece)/.test(h.d || '')) return h.ac === 'abrir' ? 'Já estava aberta' : 'Já estava fechada';
     return h.ac === 'abrir' ? 'Aberta' : /finalizada/.test(h.d || '') ? 'Fechada e finalizada' : 'Fechada';
@@ -2190,6 +2347,7 @@
       <div id="k-ex-conf" class="muted">${conferirEx(CFG.exFuncionarios, funcs)}</div>
       <label>Tratativa padrão (usada na 2ª inspeção quando você não escreve uma)<input id="k-trat" value="${esc(CFG.tratativaPadrao)}"></label>
       <details><summary>Avançado</summary><label style="margin-top:8px;max-width:240px">Pausa entre consultas ao SGQ (ms)<input id="k-pausa" type="number" min="200" value="${esc(CFG.pausaMs)}"></label>
+        <label style="margin-top:8px;max-width:340px">Campo do SGQ onde vai o local de uma nova verificação<select id="k-campo">${[1, 2, 3, 4].map((n) => `<option value="${n}" ${+CFG.campoLocal === n ? 'selected' : ''}>Campo ${n}</option>`).join('')}</select></label>
         <label style="margin-top:8px;max-width:340px">Consultas ao mesmo tempo ao ler mapa e relatórios (1 a 6; gravar é sempre uma por vez)<input id="k-par" type="number" min="1" max="6" value="${esc(CFG.leiturasJuntas || 3)}"></label></details>
       <div class="row"><button class="b p" id="k-salva">Salvar configuração</button><button class="b" id="k-reset">Voltar ao padrão</button></div></div>${perfilHtml()}`;
     // "Salvar perfil" com a configuração ainda não salva para esta obra (ex.: gerou o diagnóstico antes de salvar):
@@ -2248,6 +2406,7 @@
         exFuncionarios: $('#k-ex').value.split(/\r?\n/).map((x) => x.trim()).filter(Boolean),
         tratativaPadrao: $('#k-trat').value.trim() || PADRAO.tratativaPadrao,
         pausaMs: Math.max(200, +$('#k-pausa').value || 400),
+        campoLocal: +(($('#k-campo') || {}).value) || 1,
         leiturasJuntas: Math.min(6, Math.max(1, Math.round(+$('#k-par').value) || 3)),
         escuro: $('#k-escuro').checked,
       });
