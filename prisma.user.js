@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Prisma - FVS no SGQ
 // @namespace    realiza-bot-fvs
-// @version      2.29
+// @version      2.30
 // @author       João Pedro Ramos
 // @description  Prisma: mapa das torres, fila de comandos, relatórios e preenchimento de FVS no SGQ da Realiza, com travas de segurança. Usa o login do próprio usuário no SGQ.
 // @match        https://gdol.sgq2.com.br/*
@@ -17,7 +17,7 @@
 
   // ============================== CONFIGURAÇÃO PADRÃO ==============================
   // Tudo aqui pode ser trocado pela aba "Configuração" do painel (fica salvo no navegador).
-  const VERSAO = '2.29';
+  const VERSAO = '2.30';
   const CANAL = 'oficial'; // 'oficial' ou 'teste' (o arquivo prisma-teste.user.js usa 'teste')
   const PADRAO = {
     obraNome: '', idObra: null,
@@ -504,6 +504,16 @@
     let verifs = await listarVerif(idS);
     let abertas = verifs.filter((i) => i.status === 0 || i.status === 3);
     let lista = null;
+    const nova = !!(t.opc && t.opc.nova);
+    let reuso = null; // nova verificação: a que já existe aberta com o mesmo local (rodou de novo)
+    if (nova) {
+      const campoK = 'campo' + (+CFG.campoLocal || 1);
+      for (const v of abertas) {
+        const d = ((await api('GET', '/obras/inspecoes-obra/' + v.idInspecaoObra)).j || {}).item || {};
+        if (norm(d[campoK] || v[campoK] || '') === norm(t.opc.local)) { reuso = v; break; }
+      }
+      abertas = reuso ? [reuso] : []; // as outras verificações abertas (de outro local) ficam como estão
+    }
     if (abertas.length > 1) { // confere todas antes de gravar qualquer uma
       const dt = (s) => s ? new Date(s).toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' }) : '?';
       const bloq = [];
@@ -520,8 +530,14 @@
     const naTxt = g.na.length ? 'NA ' + g.na.join(', ') : 'sem NA';
 
     const comOc = !!(t.oc && t.oc.length);
-    const nova = !!(t.opc && t.opc.nova);
-    if (nova && V) return PEND(`já existe verificação aberta desta FVS (aberta em ${V.dataAbertura ? new Date(V.dataAbertura).toLocaleDateString('pt-BR') : '?'}): termine ou exclua essa antes de criar uma nova`);
+    if (reuso) dupNota = (dupNota ? dupNota + '; ' : '') + `verificação "${t.opc.local}" já existia aberta; usei ela`;
+    // FVS finalizada: reabre (igual ao botão Reabrir do SGQ) antes de criar a verificação nova; no Fechar ela é finalizada de novo no fim.
+    if (nova && fv[0].status === 1 && !simular) {
+      const ra = await api('POST', '/obras/obra-checklist-servicos/update/status', { idObraChecklistServico: idS, status: 0 });
+      const st = ((await servicosDaArea(a.id)).find((x) => x.idObraChecklistServico === idS) || {}).status;
+      if (ra.st !== 200 || st === 1) return PEND('não consegui reabrir a FVS finalizada para criar a verificação nova (' + (ra.st !== 200 ? msgErro(ra) : 'continua finalizada') + '): clique em Reabrir na tela do SGQ e rode de novo');
+      dupNota = (dupNota ? dupNota + '; ' : '') + 'FVS reaberta';
+    }
     if (!V) {
       if (verifs.length && !nova) {
         if (comOc) return PEND('a verificação desta FVS já está encerrada: a ocorrência não foi criada (registre pela tela do SGQ)');
@@ -530,14 +546,15 @@
         if (simular) return OK('SIMULAÇÃO: só finalizaria a FVS (verificação já encerrada)');
         return (await finalizarFvs(idS)) ? OK('verificação já estava encerrada; FVS finalizada') : PEND('erro ao finalizar a FVS');
       }
-      if (simular) return OK(`SIMULAÇÃO: ${nova ? `criaria uma NOVA verificação (local "${t.opc.local}"${verifs.length ? `, além das ${verifs.length} que já existem` : ''}) ` : 'criaria a ficha '}em ${fmt(t.dAbrir)}, ${comOc ? `${t.acao === 'abrir' ? `marcaria os itens 1 a ${g.pre}` : 'preencheria os itens'}, marcaria R e criaria ocorrência no ${t.oc.map((o) => 'item ' + o.item).join(', ')}${t.acao === 'fechar' && t.oc.every((o) => (o.tratativa || '').trim()) ? ' com tratativa, aprovaria a 2ª inspeção e encerraria em ' + fmt(t.dFechar) : ' e deixaria iniciada (sem encerrar)'}` : t.acao === 'abrir' ? `marcaria os itens 1 a ${g.pre} e deixaria iniciada` : `preencheria tudo e encerraria em ${fmt(t.dFechar)}`} (${naTxt})`);
+      if (simular) return OK(`SIMULAÇÃO: ${nova ? `criaria uma NOVA verificação (${fv[0].status === 1 ? 'reabrindo a FVS finalizada, ' : ''}local "${t.opc.local}"${verifs.length ? `, além das ${verifs.length} que já existem` : ''}) ` : 'criaria a ficha '}em ${fmt(t.dAbrir)}, ${comOc ? `${t.acao === 'abrir' ? `marcaria os itens 1 a ${g.pre}` : 'preencheria os itens'}, marcaria R e criaria ocorrência no ${t.oc.map((o) => 'item ' + o.item).join(', ')}${t.acao === 'fechar' && t.oc.every((o) => (o.tratativa || '').trim()) ? ' com tratativa, aprovaria a 2ª inspeção e encerraria em ' + fmt(t.dFechar) : ' e deixaria iniciada (sem encerrar)'}` : t.acao === 'abrir' ? `marcaria os itens 1 a ${g.pre} e deixaria iniciada` : `preencheria tudo e encerraria em ${fmt(t.dFechar)}`} (${naTxt})`);
+      const antes = new Set(verifs.map((i) => i.idInspecaoObra));
       const campos = { campo1: null, campo2: null, campo3: null, campo4: null };
       if (nova && t.opc.local) campos['campo' + (+CFG.campoLocal || 1)] = t.opc.local;
       const c = await api('POST', '/obras/inspecoes-obra/create', { idObraChecklistServico: idS, data: isoDia(t.dAbrir), ...campos });
       if (c.st !== 200) return PEND((nova && fv[0].status === 1 ? 'o SGQ não deixou criar outra verificação com a FVS finalizada (reabra a FVS na tela do SGQ e rode de novo): ' : 'erro ao criar verificação: ') + msgErro(c));
       if (nova) dupNota = (dupNota ? dupNota + '; ' : '') + `nova verificação "${t.opc.local}"`;
-      verifs = await listarVerif(idS); abertas = verifs.filter((i) => i.status === 0 || i.status === 3);
-      if (abertas.length !== 1) return PEND(`depois de criar apareceram ${abertas.length} verificações abertas: conferir`);
+      verifs = await listarVerif(idS); abertas = verifs.filter((i) => (i.status === 0 || i.status === 3) && !antes.has(i.idInspecaoObra));
+      if (abertas.length !== 1) return PEND(`depois de criar apareceram ${abertas.length} verificações novas abertas: conferir`);
       V = abertas[0]; criada = true;
     }
 
