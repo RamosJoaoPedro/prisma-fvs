@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Prisma - FVS no SGQ
 // @namespace    realiza-bot-fvs
-// @version      2.31
+// @version      2.32
 // @author       João Pedro Ramos
 // @description  Prisma: mapa das torres, fila de comandos, relatórios e preenchimento de FVS no SGQ da Realiza, com travas de segurança. Usa o login do próprio usuário no SGQ.
 // @match        https://gdol.sgq2.com.br/*
@@ -17,7 +17,7 @@
 
   // ============================== CONFIGURAÇÃO PADRÃO ==============================
   // Tudo aqui pode ser trocado pela aba "Configuração" do painel (fica salvo no navegador).
-  const VERSAO = '2.31';
+  const VERSAO = '2.32';
   const CANAL = 'oficial'; // 'oficial' ou 'teste' (o arquivo prisma-teste.user.js usa 'teste')
   const PADRAO = {
     obraNome: '', idObra: null,
@@ -434,7 +434,7 @@
     const amostras = [];
     for (const [n, a] of aptos.concat(halls)) {
       log && log(`lendo ${n}...`);
-      const v = ((await api('POST', '/obras/inspecoes-obra', { idObraChecklistServico: a.fvs[cod][0], page: 1, rowsPerPage: 20 })).j || {}).items || [];
+      const v = ((await api('POST', '/obras/inspecoes-obra', { idObraChecklistServico: a.fvs[cod][0], data: null, localizacao: '', status: 4, page: 1, rowsPerPage: 20 })).j || {}).items || [];
       const enc = v.find((i) => i.status === 1 || i.status === 2); if (!enc) continue;
       const d = ((await api('GET', '/obras/inspecoes-obra/' + enc.idInspecaoObra)).j || {}).item || {};
       const it = ((await api('POST', '/obras/inspecoes-obra/' + enc.idInspecaoObra + '/items', { page: 1, rowsPerPage: 300 })).j || {}).items || [];
@@ -482,25 +482,35 @@
   const PEND = (msg) => ({ resultado: 'PENDENTE', msg });
   const NOME_ACAO = { abrir: 'Abrir', fechar: 'Fechar', excluir: 'Excluir' };
 
+  // O SGQ atualizado (nov/2026) diz por obra se a data de cada item aparece (atributosobras: exibirDataInspecao).
+  // Quando não aparece, a tela dele não manda data por item; o Prisma faz igual. Sem resposta, mantém o jeito antigo.
+  let ATRIB = null;
+  async function atributosObra() {
+    if (ATRIB) return ATRIB;
+    try { const r = await api('GET', '/obras/atributosobras/list'); ATRIB = ok2xx(r.st) && r.j && typeof r.j === 'object' ? r.j : {}; } catch (e) { if (/Sessão expirada/.test(e.message)) throw e; ATRIB = {}; }
+    return ATRIB;
+  }
   async function salvarFicha(idInspecao, status, itens, dataEncerramento) {
+    const comDatas = (await atributosObra()).exibirDataInspecao !== false;
     await sleep(CFG.pausaMs);
     const fd = new FormData();
-    fd.append('idInspecaoObra', String(idInspecao)); fd.append('idObra', String(CFG.idObra));
-    fd.append('idFuncionarioAprovado', String(CFG.idAprovado)); fd.append('idFuncionarioInspecionado', String(CFG.idInspecionado));
+    // mesma ordem que a tela do SGQ manda (gravado em 23/11/2026)
+    fd.append('idObra', String(CFG.idObra)); fd.append('idInspecaoObra', String(idInspecao));
+    fd.append('idFuncionarioInspecionado', String(CFG.idInspecionado)); fd.append('idFuncionarioAprovado', String(CFG.idAprovado));
     fd.append('status', String(status)); if (dataEncerramento) fd.append('dataEncerramento', dataEncerramento);
+    for (let n = 1; n <= 5; n++) fd.append('limparArquivo' + n, 'false');
     itens.forEach((it, k) => {
       fd.append(`inspecaoObraItens[${k}][idInspecaoObraItem]`, String(it.idInspecaoObraItens));
       fd.append(`inspecaoObraItens[${k}][inspecao1]`, it.inspecao1 || '');
       fd.append(`inspecaoObraItens[${k}][inspecao2]`, it.inspecao2 || '');
-      if (it.dataInspecao1) fd.append(`inspecaoObraItens[${k}][dataInspecao1]`, it.dataInspecao1);
-      if (it.dataInspecao2) fd.append(`inspecaoObraItens[${k}][dataInspecao2]`, it.dataInspecao2);
+      if (comDatas && it.dataInspecao1) fd.append(`inspecaoObraItens[${k}][dataInspecao1]`, it.dataInspecao1);
+      if (comDatas && it.dataInspecao2) fd.append(`inspecaoObraItens[${k}][dataInspecao2]`, it.dataInspecao2);
     });
-    for (let n = 1; n <= 5; n++) fd.append('limparArquivo' + n, 'false');
     const r = await fetchOrig(API + '/obras/inspecoes-obra/update-with-validation', { method: 'POST', headers: cabecalhos(false), body: fd });
     const t = await r.text(); let j = null; try { j = JSON.parse(t); } catch (e) {}
     return { ok: ok2xx(r.status), msg: msgErro({ st: r.status, j, t }) };
   }
-  const listarVerif = async (idS) => ((await api('POST', '/obras/inspecoes-obra', { idObraChecklistServico: idS, page: 1, rowsPerPage: 50 })).j || {}).items || [];
+  const listarVerif = async (idS) => ((await api('POST', '/obras/inspecoes-obra', { idObraChecklistServico: idS, data: null, localizacao: '', status: 4, page: 1, rowsPerPage: 100 })).j || {}).items || [];
   const finalizarFvs = async (idS) => ok2xx((await api('POST', '/obras/obra-checklist-servicos/update/status', { idObraChecklistServico: idS, status: 1 })).st);
 
   // t = { area, fvs, acao:'abrir'|'fechar', dAbrir, dFechar, na?, pre?, opc:{assumir, segunda, tratativa} }
@@ -704,13 +714,20 @@
     const fechaJunto = tratadas && t.acao === 'fechar';
     if (simular && fechaJunto) return OK(`${assumidaDe ? 'assumiria a ficha de ' + assumidaDe + ', ' : ''}marcaria R e criaria ocorrência com tratativa no ${txtItens}, aprovaria a 2ª inspeção, preencheria ${preenchidos} itens e encerraria em ${fmt(t.dFechar)} (${naTxt})`);
     if (simular) return OK(`${assumidaDe ? 'assumiria a ficha de ' + assumidaDe + ', ' : ''}preencheria ${preenchidos} itens, marcaria R e criaria ocorrência no ${txtItens} e deixaria a ficha iniciada, sem encerrar (${naTxt})`);
+    // Igual à tela do SGQ: primeiro marca o item como R e salva a ficha, depois cria a ocorrência no item já reprovado.
+    for (const [, x] of alvo) { x.inspecao1 = 'R'; x.dataInspecao1 = isoItem(dia); }
+    const s = await salvarFicha(V.idInspecaoObra, 3, itens, null);
+    if (!s.ok) return PEND(`o SGQ recusou salvar a ficha com o item R (${txtItens}): ${s.msg}`);
     for (const [oc, x] of novas) {
       const c = await api('POST', '/obras/inspecoes-obra/' + V.idInspecaoObra + '/ocorrencias/create', { idObra: CFG.idObra, idInspecaoObraItens: x.idInspecaoObraItens, inspecao: 1, descricao: oc.texto.trim(), dataDescricao: isoDia(dia), tratativa: (oc.tratativa || '').trim() || null, dataTratativa: (oc.tratativa || '').trim() ? isoDia(oc.dataTrat || t.dFechar || dia) : null });
       if (!ok2xx(c.st)) return PEND(`erro ao criar a ocorrência do item ${oc.item}: ${msgErro(c)}`);
     }
-    for (const [, x] of alvo) { x.inspecao1 = 'R'; x.dataInspecao1 = isoItem(dia); }
-    const s = await salvarFicha(V.idInspecaoObra, 3, itens, null);
-    if (!s.ok) return PEND(`ocorrência criada (${txtItens}), mas o SGQ recusou salvar a ficha: ${s.msg}`);
+    // confere que a ocorrência apareceu mesmo (o SGQ pode responder OK sem criar)
+    if (novas.length) {
+      const ocs2 = ((await api('POST', '/obras/inspecoes-obra/' + V.idInspecaoObra + '/ocorrencias', { page: 1, rowsPerPage: 200 })).j || {}).items || [];
+      const faltam = novas.filter(([, x]) => !ocs2.some((o) => o.idInspecaoObraItens === x.idInspecaoObraItens));
+      if (faltam.length) return PEND(`o SGQ respondeu OK, mas a ocorrência não apareceu no ${faltam.map(([oc]) => 'item ' + oc.item).join(', ')} (o item ficou R): grave a tela do SGQ criando uma ocorrência (Configuração → Diagnóstico) e mande ao Claude`);
+    }
     const dep = (await listarVerif(idS)).find((i) => i.idInspecaoObra === V.idInspecaoObra);
     if (!dep || dep.status !== 3) return PEND('ocorrência criada, mas confira a ficha na tela (status ' + (dep ? dep.status : '?') + ')');
     if (fechaJunto) {
@@ -1509,11 +1526,11 @@
       if (ocupado() || !(await antesDeGravar())) return;
       LENDO = true; status('Criando a ocorrência...');
       try {
-        const c = await api('POST', '/obras/inspecoes-obra/' + r.v.idInspecaoObra + '/ocorrencias/create', { idObra: CFG.idObra, idInspecaoObraItens: x.idInspecaoObraItens, inspecao: 1, descricao: texto, dataDescricao: isoDia(dia), tratativa: trat || null, dataTratativa: trat ? isoDia(dia) : null });
-        if (!ok2xx(c.st)) throw new Error('o SGQ recusou a ocorrência: ' + msgErro(c));
         x.inspecao1 = 'R'; x.dataInspecao1 = isoItem(dia);
         const sv = await salvarFicha(r.v.idInspecaoObra, 3, r.itens, null);
-        if (!sv.ok) throw new Error('ocorrência criada, mas o SGQ recusou marcar o item como R: ' + sv.msg);
+        if (!sv.ok) throw new Error('o SGQ recusou marcar o item como R: ' + sv.msg);
+        const c = await api('POST', '/obras/inspecoes-obra/' + r.v.idInspecaoObra + '/ocorrencias/create', { idObra: CFG.idObra, idInspecaoObraItens: x.idInspecaoObraItens, inspecao: 1, descricao: texto, dataDescricao: isoDia(dia), tratativa: trat || null, dataTratativa: trat ? isoDia(dia) : null });
+        if (!ok2xx(c.st)) throw new Error('o item ficou R, mas o SGQ recusou a ocorrência: ' + msgErro(c));
         HIST.push({ q: new Date().toISOString(), a: F.area, f: F.cod, ac: 'criar ocorrência', r: 'OK', d: `item ${parseInt(x.ordem, 10)}: ${texto}`, src: 'prisma', u: CFG.nomeInspecionado }); salvarHist();
         FICHA = await lerFicha(F.area, F.cod); status('Ocorrência criada no SGQ.');
       } catch (e) { status('Erro: ' + e.message); try { FICHA = await lerFicha(F.area, F.cod); } catch (e2) {} }
@@ -2382,7 +2399,7 @@
     if (idArea) await tenta('FVS de um local', 'POST', '/obras/obra-checklist-servicos', { idObra: CFG.idObra, idObraAreaChecklist: idArea, statusChecklist: 2, statusVerificacao: 3, page: 1, rowsPerPage: 5 }, (j) => j.items);
     let achou = false;
     for (const k of cand.slice(0, 6)) {
-      const rv = await tenta('verificações da FVS ' + k.c, 'POST', '/obras/inspecoes-obra', { idObraChecklistServico: k.e[0], page: 1, rowsPerPage: 5 }, (j) => j.items);
+      const rv = await tenta('verificações da FVS ' + k.c, 'POST', '/obras/inspecoes-obra', { idObraChecklistServico: k.e[0], data: null, localizacao: '', status: 4, page: 1, rowsPerPage: 5 }, (j) => j.items);
       const v = rv && rv.j && rv.j.items && rv.j.items[0]; if (!v) continue;
       await tenta('detalhe da verificação', 'GET', '/obras/inspecoes-obra/' + v.idInspecaoObra, null, (j) => j.item);
       await tenta('itens da verificação', 'POST', '/obras/inspecoes-obra/' + v.idInspecaoObra + '/items', { page: 1, rowsPerPage: 3 }, (j) => j.items);
