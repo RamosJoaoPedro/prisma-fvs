@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Prisma - FVS no SGQ
 // @namespace    realiza-bot-fvs
-// @version      2.32
+// @version      2.33
 // @author       João Pedro Ramos
 // @description  Prisma: mapa das torres, fila de comandos, relatórios e preenchimento de FVS no SGQ da Realiza, com travas de segurança. Usa o login do próprio usuário no SGQ.
 // @match        https://gdol.sgq2.com.br/*
@@ -17,7 +17,7 @@
 
   // ============================== CONFIGURAÇÃO PADRÃO ==============================
   // Tudo aqui pode ser trocado pela aba "Configuração" do painel (fica salvo no navegador).
-  const VERSAO = '2.32';
+  const VERSAO = '2.33';
   const CANAL = 'teste'; // 'oficial' ou 'teste' (o arquivo prisma-teste.user.js usa 'teste')
   const PADRAO = {
     obraNome: '', idObra: null,
@@ -190,10 +190,25 @@
   const avisoHtml = () => { const a = AVISO || {}; const b = bloqueio(); if (b) return `<div class="aviso-c bloq">${esc(b)}</div>`; return a.mensagem ? `<div class="aviso-c">${esc(a.mensagem)}</div>` : ''; };
 
   const ok2xx = (st) => st >= 200 && st < 300; // a API nova do SGQ pode responder 201/204 em vez de 200
+  // SGQ atualizado (nov/2026): criar e editar ocorrência passou a ir como formulário (multipart), igual à tela dele,
+  // com os campos nesta ordem; sem tratativa, a data da tratativa não vai. O resto da API continua em JSON.
+  const ROTA_FORM = /\/ocorrencias\/(create|update)$/;
+  function formOcorrencia(b) {
+    const fd = new FormData(); const tr = String(b.tratativa ?? '').trim();
+    const put = (k, v) => fd.append(k, v == null ? '' : String(v));
+    put('idObra', b.idObra);
+    if (b.idInformacoesInspecaoObra != null) put('idInformacoesInspecaoObra', b.idInformacoesInspecaoObra);
+    put('idInspecaoObraItens', b.idInspecaoObraItens); put('inspecao', b.inspecao || 1);
+    put('descricao', b.descricao); put('dataDescricao', b.dataDescricao);
+    put('tratativa', tr); if (tr && b.dataTratativa) put('dataTratativa', b.dataTratativa);
+    put('descArquivo1', ''); put('descArquivo2', ''); put('limparArquivo1', 'false'); put('limparArquivo2', 'false');
+    return fd;
+  }
   async function api(method, path, body) {
+    const form = body && ROTA_FORM.test(path);
     for (let tent = 1; ; tent++) {
       await sleep(CFG.pausaMs);
-      const r = await fetchOrig(API + path, { method, headers: cabecalhos(true), body: body ? JSON.stringify(body) : undefined });
+      const r = await fetchOrig(API + path, { method, headers: cabecalhos(!form), body: form ? formOcorrencia(body) : body ? JSON.stringify(body) : undefined });
       // SGQ pediu para ir mais devagar (429 = recusou sem gravar nada): espera e tenta de novo, até 3 vezes.
       // Outros erros não repetem: um 503 pode chegar depois de o SGQ já ter gravado, e repetir duplicaria a ficha.
       if (r.status === 429 && tent < 3) { await sleep(2000 * tent); continue; }
