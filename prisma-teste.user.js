@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Prisma - FVS no SGQ
 // @namespace    realiza-bot-fvs
-// @version      2.30
+// @version      2.31
 // @author       João Pedro Ramos
 // @description  Prisma: mapa das torres, fila de comandos, relatórios e preenchimento de FVS no SGQ da Realiza, com travas de segurança. Usa o login do próprio usuário no SGQ.
 // @match        https://gdol.sgq2.com.br/*
@@ -17,7 +17,7 @@
 
   // ============================== CONFIGURAÇÃO PADRÃO ==============================
   // Tudo aqui pode ser trocado pela aba "Configuração" do painel (fica salvo no navegador).
-  const VERSAO = '2.30';
+  const VERSAO = '2.31';
   const CANAL = 'teste'; // 'oficial' ou 'teste' (o arquivo prisma-teste.user.js usa 'teste')
   const PADRAO = {
     obraNome: '', idObra: null,
@@ -104,25 +104,51 @@
     REC.passos.push(p); LS.set('recLocal', REC); return p;
   };
   const recResp = (p, st, txt) => { if (!p) return; p.st = st; p.r = String(txt || '').slice(0, 20000); LS.set('recLocal', REC); };
+  // ---- Diagnóstico "o SGQ mudou": grava TUDO o que a tela do SGQ pede (qualquer endereço, qualquer método) enquanto ligado,
+  // para descobrir rota nova, campo renomeado ou servidor novo. Não guarda senha nem o token: só endereço, corpo e resposta (cortados).
+  const SPY = LS.get('espiao', null) || { ativo: false, L: [], hosts: {} };
+  const ESTATICO = /\.(js|mjs|css|png|jpe?g|gif|svg|webp|woff2?|ttf|ico|map|json\?v=)(\?|$)/i;
+  const corpoTxt = (b) => { try {
+    if (b == null) return '';
+    if (typeof b === 'string') return b.slice(0, 4000);
+    if (typeof FormData !== 'undefined' && b instanceof FormData) { const o = []; b.forEach((v, k) => o.push(k + '=' + (typeof v === 'string' ? v.slice(0, 200) : '[arquivo]'))); return 'FORMDATA ' + o.join(' & ').slice(0, 4000); }
+    if (typeof URLSearchParams !== 'undefined' && b instanceof URLSearchParams) return 'FORM ' + b.toString().slice(0, 4000);
+    return '[' + Object.prototype.toString.call(b) + ']';
+  } catch (e) { return '[?]'; } };
+  const spyNovo = (m, u, body, auth) => {
+    try {
+      u = String(u || ''); const h = (/^https?:\/\/([^/]+)/.exec(u) || [])[1] || location.host;
+      if (auth) SPY.hosts[h] = (SPY.hosts[h] || 0) + 1;
+      if (!SPY.ativo || ESTATICO.test(u) || /raw\.githubusercontent|google|gstatic|hotjar|clarity|sentry/i.test(u)) return null;
+      const p = { t: new Date().toISOString(), m: String(m || 'GET').toUpperCase(), u: u.slice(0, 500), b: corpoTxt(body), st: 0, r: '' };
+      SPY.L.push(p); if (SPY.L.length > 400) SPY.L.splice(0, SPY.L.length - 400); return p;
+    } catch (e) { return null; }
+  };
+  const spyResp = (p, st, txt) => { if (!p) return; p.st = st; p.r = String(txt || '').slice(0, 2500); LS.set('espiao', SPY); };
   (function capturar() {
     const guarda = (k, v) => { k = String(k).toLowerCase(); if (k === 'content-type' || k === 'content-length') return; CAP.h[k] = String(v); CAP.ts = Date.now(); };
     try {
       const op = XMLHttpRequest.prototype.open, sh = XMLHttpRequest.prototype.setRequestHeader;
       const sd = XMLHttpRequest.prototype.send;
       XMLHttpRequest.prototype.open = function (m, u) { this.__pu = String(u || ''); this.__pm = String(m || 'GET'); return op.apply(this, arguments); };
-      XMLHttpRequest.prototype.setRequestHeader = function (k, v) { try { if (API_RX.test(this.__pu || '')) guarda(k, v); } catch (e) {} return sh.apply(this, arguments); };
+      XMLHttpRequest.prototype.setRequestHeader = function (k, v) { try { if (/^authorization$/i.test(k)) this.__auth = true; if (API_RX.test(this.__pu || '')) guarda(k, v); } catch (e) {} return sh.apply(this, arguments); };
       XMLHttpRequest.prototype.send = function (body) {
+        try { const sp = spyNovo(this.__pm, this.__pu, body, this.__auth); if (sp) this.addEventListener('loadend', () => { try { spyResp(sp, this.status, this.responseType && this.responseType !== 'text' ? JSON.stringify(this.response) : this.responseText); } catch (e) {} }); } catch (e) {}
         try { const p = recNovo(this.__pm, this.__pu, body); if (p) this.addEventListener('loadend', () => { try { recResp(p, this.status, this.responseType && this.responseType !== 'text' ? JSON.stringify(this.response) : this.responseText); } catch (e) {} }); } catch (e) {}
         return sd.apply(this, arguments);
       };
     } catch (e) {}
     try {
       window.fetch = function (input, init) {
-        let p = null;
+        let p = null, sp = null;
+        try { const u = typeof input === 'string' ? input : (input && input.url) || (input && input.href) || '';
+          let auth = false; try { new Headers((init && init.headers) || (input && input.headers) || {}).forEach((v, k) => { if (/^authorization$/i.test(k)) auth = true; }); } catch (e) {}
+          sp = spyNovo((init && init.method) || (input && input.method) || 'GET', u, init && init.body, auth); } catch (e) {}
         try { const u = typeof input === 'string' ? input : (input && input.url) || ''; if (API_RX.test(u)) new Headers((init && init.headers) || (input && input.headers) || {}).forEach((v, k) => guarda(k, v));
           p = recNovo((init && init.method) || (input && input.method) || 'GET', u, init && init.body); } catch (e) {}
         const pr = fetchOrig.apply(this, arguments);
         if (p) pr.then((r) => r.clone().text().then((t) => recResp(p, r.status, t))).catch(() => {});
+        if (sp) pr.then((r) => r.clone().text().then((t) => spyResp(sp, r.status, t))).catch((e) => spyResp(sp, -1, 'falhou: ' + (e && e.message)));
         return pr;
       };
     } catch (e) {}
@@ -163,6 +189,7 @@
     return ''; };
   const avisoHtml = () => { const a = AVISO || {}; const b = bloqueio(); if (b) return `<div class="aviso-c bloq">${esc(b)}</div>`; return a.mensagem ? `<div class="aviso-c">${esc(a.mensagem)}</div>` : ''; };
 
+  const ok2xx = (st) => st >= 200 && st < 300; // a API nova do SGQ pode responder 201/204 em vez de 200
   async function api(method, path, body) {
     for (let tent = 1; ; tent++) {
       await sleep(CFG.pausaMs);
@@ -194,14 +221,14 @@
   async function listarAreas() {
     if (!AREAS) {
       const r = await api('POST', '/obras/area-checklists', { idObra: CFG.idObra, area: '', status: 2, page: 1, rowsPerPage: 3000 });
-      if (r.st !== 200) throw new Error('Não consegui ler as áreas da obra (' + r.st + ').');
+      if (!ok2xx(r.st)) throw new Error('Não consegui ler as áreas da obra (' + r.st + ').');
       AREAS = r.j.items.map((a) => ({ id: a.idObraAreaChecklist, nome: a.descricao.trim() }));
     }
     return AREAS;
   }
   async function carregarNomes() {
     const r = await api('POST', '/obras/servico/dropdown', { idObra: CFG.idObra });
-    if (r.st !== 200) return;
+    if (!ok2xx(r.st)) return;
     for (const it of r.j.itens || []) {
       const m = /^\s*(FVS\s+\d{3}(?:\s*[A-Z]\d?)?)\s*-\s*([\s\S]*)$/i.exec(it.descricao || '');
       if (m) NOMES[codNorm(m[1])] = m[2].replace(/\s+/g, ' ').trim();
@@ -210,7 +237,7 @@
   }
   async function servicosDaArea(idArea) {
     const r = await api('POST', '/obras/obra-checklist-servicos', { idObra: CFG.idObra, idObraAreaChecklist: idArea, statusChecklist: 2, statusVerificacao: 3, page: 1, rowsPerPage: 300 });
-    if (r.st !== 200) throw new Error('erro ao ler as FVS da área (' + r.st + ')');
+    if (!ok2xx(r.st)) throw new Error('erro ao ler as FVS da área (' + r.st + ')');
     return r.j.items;
   }
   async function atualizarArea(nome) {
@@ -471,10 +498,10 @@
     for (let n = 1; n <= 5; n++) fd.append('limparArquivo' + n, 'false');
     const r = await fetchOrig(API + '/obras/inspecoes-obra/update-with-validation', { method: 'POST', headers: cabecalhos(false), body: fd });
     const t = await r.text(); let j = null; try { j = JSON.parse(t); } catch (e) {}
-    return { ok: r.status === 200, msg: msgErro({ st: r.status, j, t }) };
+    return { ok: ok2xx(r.status), msg: msgErro({ st: r.status, j, t }) };
   }
   const listarVerif = async (idS) => ((await api('POST', '/obras/inspecoes-obra', { idObraChecklistServico: idS, page: 1, rowsPerPage: 50 })).j || {}).items || [];
-  const finalizarFvs = async (idS) => (await api('POST', '/obras/obra-checklist-servicos/update/status', { idObraChecklistServico: idS, status: 1 })).st === 200;
+  const finalizarFvs = async (idS) => ok2xx((await api('POST', '/obras/obra-checklist-servicos/update/status', { idObraChecklistServico: idS, status: 1 })).st);
 
   // t = { area, fvs, acao:'abrir'|'fechar', dAbrir, dFechar, na?, pre?, opc:{assumir, segunda, tratativa} }
   async function executarTarefa(t, simular) {
@@ -535,7 +562,7 @@
     if (nova && fv[0].status === 1 && !simular) {
       const ra = await api('POST', '/obras/obra-checklist-servicos/update/status', { idObraChecklistServico: idS, status: 0 });
       const st = ((await servicosDaArea(a.id)).find((x) => x.idObraChecklistServico === idS) || {}).status;
-      if (ra.st !== 200 || st === 1) return PEND('não consegui reabrir a FVS finalizada para criar a verificação nova (' + (ra.st !== 200 ? msgErro(ra) : 'continua finalizada') + '): clique em Reabrir na tela do SGQ e rode de novo');
+      if (!ok2xx(ra.st) || st === 1) return PEND('não consegui reabrir a FVS finalizada para criar a verificação nova (' + (!ok2xx(ra.st) ? msgErro(ra) : 'continua finalizada') + '): clique em Reabrir na tela do SGQ e rode de novo');
       dupNota = (dupNota ? dupNota + '; ' : '') + 'FVS reaberta';
     }
     if (!V) {
@@ -551,7 +578,7 @@
       const campos = { campo1: null, campo2: null, campo3: null, campo4: null };
       if (nova && t.opc.local) campos['campo' + (+CFG.campoLocal || 1)] = t.opc.local;
       const c = await api('POST', '/obras/inspecoes-obra/create', { idObraChecklistServico: idS, data: isoDia(t.dAbrir), ...campos });
-      if (c.st !== 200) return PEND((nova && fv[0].status === 1 ? 'o SGQ não deixou criar outra verificação com a FVS finalizada (reabra a FVS na tela do SGQ e rode de novo): ' : 'erro ao criar verificação: ') + msgErro(c));
+      if (!ok2xx(c.st)) return PEND((nova && fv[0].status === 1 ? 'o SGQ não deixou criar outra verificação com a FVS finalizada (reabra a FVS na tela do SGQ e rode de novo): ' : 'erro ao criar verificação: ') + msgErro(c));
       if (nova) dupNota = (dupNota ? dupNota + '; ' : '') + `nova verificação "${t.opc.local}"`;
       verifs = await listarVerif(idS); abertas = verifs.filter((i) => (i.status === 0 || i.status === 3) && !antes.has(i.idInspecaoObra));
       if (abertas.length !== 1) return PEND(`depois de criar apareceram ${abertas.length} verificações novas abertas: conferir`);
@@ -628,11 +655,11 @@
     }
     for (const x of ocCriar) {
       const c = await api('POST', '/obras/inspecoes-obra/' + V.idInspecaoObra + '/ocorrencias/create', { idObra: CFG.idObra, idInspecaoObraItens: x.idInspecaoObraItens, inspecao: 1, descricao: CFG.descricaoPadrao + (x.descricao || '').trim(), dataDescricao: x.dataInspecao1 || isoDia(t.dAbrir), tratativa: trat, dataTratativa: isoDia(t.dFechar) });
-      if (c.st !== 200) return PEND('erro ao criar ocorrência do item ' + parseInt(x.ordem, 10) + ': ' + msgErro(c));
+      if (!ok2xx(c.st)) return PEND('erro ao criar ocorrência do item ' + parseInt(x.ordem, 10) + ': ' + msgErro(c));
     }
     for (const o of ocCompletar) {
       const u = await api('POST', '/obras/inspecoes-obra/' + V.idInspecaoObra + '/ocorrencias/update', { idObra: CFG.idObra, idInformacoesInspecaoObra: o.idInformacoesInspecaoObra, idInspecaoObraItens: o.idInspecaoObraItens, inspecao: o.inspecaoValue || 1, descricao: o.descricao, dataDescricao: o.data || isoDia(t.dAbrir), tratativa: o.tratativa || trat, dataTratativa: o.dataTratativa || isoDia(t.dFechar) });
-      if (u.st !== 200) return PEND('erro ao completar ocorrência: ' + msgErro(u));
+      if (!ok2xx(u.st)) return PEND('erro ao completar ocorrência: ' + msgErro(u));
     }
     const alvo = t.acao === 'abrir' ? 3 : 1;
     const s = await salvarFicha(V.idInspecaoObra, alvo, itens, t.acao === 'abrir' ? null : isoDia(t.dFechar));
@@ -679,7 +706,7 @@
     if (simular) return OK(`${assumidaDe ? 'assumiria a ficha de ' + assumidaDe + ', ' : ''}preencheria ${preenchidos} itens, marcaria R e criaria ocorrência no ${txtItens} e deixaria a ficha iniciada, sem encerrar (${naTxt})`);
     for (const [oc, x] of novas) {
       const c = await api('POST', '/obras/inspecoes-obra/' + V.idInspecaoObra + '/ocorrencias/create', { idObra: CFG.idObra, idInspecaoObraItens: x.idInspecaoObraItens, inspecao: 1, descricao: oc.texto.trim(), dataDescricao: isoDia(dia), tratativa: (oc.tratativa || '').trim() || null, dataTratativa: (oc.tratativa || '').trim() ? isoDia(oc.dataTrat || t.dFechar || dia) : null });
-      if (c.st !== 200) return PEND(`erro ao criar a ocorrência do item ${oc.item}: ${msgErro(c)}`);
+      if (!ok2xx(c.st)) return PEND(`erro ao criar a ocorrência do item ${oc.item}: ${msgErro(c)}`);
     }
     for (const [, x] of alvo) { x.inspecao1 = 'R'; x.dataInspecao1 = isoItem(dia); }
     const s = await salvarFicha(V.idInspecaoObra, 3, itens, null);
@@ -1467,7 +1494,7 @@
       LENDO = true; status('Gravando a ocorrência...');
       try {
         const u = await api('POST', '/obras/inspecoes-obra/' + r.v.idInspecaoObra + '/ocorrencias/update', { idObra: CFG.idObra, idInformacoesInspecaoObra: o.idInformacoesInspecaoObra, idInspecaoObraItens: o.idInspecaoObraItens, inspecao: o.inspecaoValue || 1, descricao: desc, dataDescricao: o.data || o.dataDescricao, tratativa: trat || null, dataTratativa: trat ? isoDia(dt) : null });
-        if (u.st !== 200) throw new Error('o SGQ recusou: ' + msgErro(u));
+        if (!ok2xx(u.st)) throw new Error('o SGQ recusou: ' + msgErro(u));
         HIST.push({ q: new Date().toISOString(), a: F.area, f: F.cod, ac: 'editar ocorrência', r: 'OK', d: trat ? 'tratativa: ' + trat : 'descrição alterada', src: 'prisma', u: CFG.nomeInspecionado }); salvarHist();
         FICHA = await lerFicha(F.area, F.cod); status('Ocorrência gravada no SGQ.');
       } catch (e) { status('Não gravei: ' + e.message); }
@@ -1483,7 +1510,7 @@
       LENDO = true; status('Criando a ocorrência...');
       try {
         const c = await api('POST', '/obras/inspecoes-obra/' + r.v.idInspecaoObra + '/ocorrencias/create', { idObra: CFG.idObra, idInspecaoObraItens: x.idInspecaoObraItens, inspecao: 1, descricao: texto, dataDescricao: isoDia(dia), tratativa: trat || null, dataTratativa: trat ? isoDia(dia) : null });
-        if (c.st !== 200) throw new Error('o SGQ recusou a ocorrência: ' + msgErro(c));
+        if (!ok2xx(c.st)) throw new Error('o SGQ recusou a ocorrência: ' + msgErro(c));
         x.inspecao1 = 'R'; x.dataInspecao1 = isoItem(dia);
         const sv = await salvarFicha(r.v.idInspecaoObra, 3, r.itens, null);
         if (!sv.ok) throw new Error('ocorrência criada, mas o SGQ recusou marcar o item como R: ' + sv.msg);
@@ -2196,7 +2223,7 @@
   async function gerarDiagnostico(idObra, obraNome) {
     status('Diagnóstico: lendo as áreas da obra no SGQ (só leitura)...');
     const r = await api('POST', '/obras/area-checklists', { idObra, area: '', status: 2, page: 1, rowsPerPage: 5000 });
-    if (r.st !== 200) throw new Error('Não consegui ler as áreas da obra (' + r.st + ').');
+    if (!ok2xx(r.st)) throw new Error('Não consegui ler as áreas da obra (' + r.st + ').');
     const areas = ((r.j && r.j.items) || []).map((a) => ({ id: a.idObraAreaChecklist, nome: String(a.descricao || '').trim() }));
     status('Diagnóstico: lendo a lista de FVS da obra...');
     let fvs = []; try { const d = await api('POST', '/obras/servico/dropdown', { idObra }); fvs = ((d.j && d.j.itens) || []).map((x) => (/^\s*(FVS\s+\d{3}(?:\s*[A-Z]\d?)?)/i.exec(x.descricao || '') || [])[1]).filter(Boolean).map(codNorm); } catch (e) { if (/Sessão expirada/.test(e.message)) throw e; }
@@ -2308,7 +2335,7 @@
     const achados = new Map();
     const add = (id, nome, cc) => { id = +id; nome = String(nome || '').replace(/\s+/g, ' ').trim(); if (id && nome && !achados.has(id)) achados.set(id, { idFuncionario: id, nome, idCentroCusto: cc || obra.cc || 0 }); };
     for (const [m, path, body] of [['POST', '/commons/funcionarios/dropdown', { idCentroCusto: obra.cc, filtrarCentroCusto: true }], ['POST', '/commons/funcionarios/dropdown', {}], ['GET', '/commons/funcionarios/dropdown'], ['POST', '/commons/funcionario/dropdown', { idCentroCusto: obra.cc }]]) {
-      try { const r = await api(m, path, body); const L = r.st === 200 && r.j && (r.j.itens || r.j.items || (Array.isArray(r.j) ? r.j : null)); if (L && L.length && L[0].idFuncionario) { L.forEach((f) => add(f.idFuncionario, f.nome, f.idCentroCusto)); break; } } catch (e) { if (/Sessão expirada/.test(e.message)) throw e; }
+      try { const r = await api(m, path, body); const L = ok2xx(r.st) && r.j && (r.j.itens || r.j.items || (Array.isArray(r.j) ? r.j : null)); if (L && L.length && L[0].idFuncionario) { L.forEach((f) => add(f.idFuncionario, f.nome, f.idCentroCusto)); break; } } catch (e) { if (/Sessão expirada/.test(e.message)) throw e; }
     }
     if (achados.size < 2) {
       const ar = await api('POST', '/obras/area-checklists', { idObra: obra.id, area: '', status: 2, page: 1, rowsPerPage: 3000 });
@@ -2334,6 +2361,73 @@
     return L;
   }
 
+  // ------------------------------ DIAGNÓSTICO "O SGQ MUDOU" ------------------------------
+  // 1) Testa, só lendo, cada rota que o Prisma usa e anota o que voltou (código e nomes dos campos).
+  // 2) Grava o que a própria tela do SGQ faz enquanto a pessoa cria uma ocorrência, abre/fecha uma ficha etc.
+  // O texto gerado vai para o Claude, que compara com o que o Prisma espera e ajusta o script.
+  let TESTE = null;
+  const chaves = (o) => (o && typeof o === 'object' ? Object.keys(Array.isArray(o) ? (o[0] || {}) : o).slice(0, 60).join(', ') : typeof o);
+  const amostra = (o) => { try { return JSON.stringify(o).slice(0, 900); } catch (e) { return ''; } };
+  async function testarRotas() {
+    const R = []; const reg = (nome, rota, r, ex) => { R.push({ nome, rota, st: r ? r.st : '—', chaves: r ? chaves(ex !== undefined ? ex : r.j) : '', amostra: r ? amostra(ex !== undefined ? ex : r.j) : '' }); };
+    const tenta = async (nome, m, rota, body, pega) => { try { const r = await api(m, rota, body); const ex = pega ? (() => { try { return pega(r.j); } catch (e) { return undefined; } })() : undefined; reg(nome, m + ' ' + rota, r, ex); return r; } catch (e) { R.push({ nome, rota: m + ' ' + rota, st: 'erro', chaves: e.message, amostra: '' }); return null; } };
+    status('Testando as rotas do Prisma no SGQ (só leitura)...');
+    const ra = await tenta('áreas da obra', 'POST', '/obras/area-checklists', { idObra: CFG.idObra, area: '', status: 2, page: 1, rowsPerPage: 5 }, (j) => j.items);
+    await tenta('lista de FVS da obra', 'POST', '/obras/servico/dropdown', { idObra: CFG.idObra }, (j) => j.itens);
+    // acha um local e uma FVS com verificação (prefere com ocorrência) entre os já lidos no mapa
+    const cand = []; Object.entries(MAPA.areas).forEach(([n, a]) => Object.entries(a.fvs).forEach(([c, e]) => { if (e[2] > 0 || e[1] === 1) cand.push({ n, a, c, e }); }));
+    cand.sort((x, y) => (y.e[3] + y.e[4]) - (x.e[3] + x.e[4]));
+    const area0 = (ra && ra.j && ra.j.items && ra.j.items[0]) || null;
+    const idArea = cand[0] ? cand[0].a.id : area0 && area0.idObraAreaChecklist;
+    if (idArea) await tenta('FVS de um local', 'POST', '/obras/obra-checklist-servicos', { idObra: CFG.idObra, idObraAreaChecklist: idArea, statusChecklist: 2, statusVerificacao: 3, page: 1, rowsPerPage: 5 }, (j) => j.items);
+    let achou = false;
+    for (const k of cand.slice(0, 6)) {
+      const rv = await tenta('verificações da FVS ' + k.c, 'POST', '/obras/inspecoes-obra', { idObraChecklistServico: k.e[0], page: 1, rowsPerPage: 5 }, (j) => j.items);
+      const v = rv && rv.j && rv.j.items && rv.j.items[0]; if (!v) continue;
+      await tenta('detalhe da verificação', 'GET', '/obras/inspecoes-obra/' + v.idInspecaoObra, null, (j) => j.item);
+      await tenta('itens da verificação', 'POST', '/obras/inspecoes-obra/' + v.idInspecaoObra + '/items', { page: 1, rowsPerPage: 3 }, (j) => j.items);
+      const ro = await tenta('ocorrências da verificação', 'POST', '/obras/inspecoes-obra/' + v.idInspecaoObra + '/ocorrencias', { page: 1, rowsPerPage: 3 }, (j) => j.items);
+      achou = true; if (ro && ro.j && ro.j.items && ro.j.items.length) break;
+    }
+    if (!achou) R.push({ nome: 'verificações', rota: '—', st: 'pulado', chaves: 'nenhum local com ficha no mapa: atualize uma torre no Mapa e teste de novo', amostra: '' });
+    TESTE = { quando: new Date().toISOString(), R };
+    status('Teste das rotas pronto. Agora grave a tela do SGQ (abaixo) e copie o relatório para o Claude.');
+  }
+  function relatorioSgq() {
+    const host = (u) => (/^https?:\/\/([^/]+)/.exec(u) || [])[1] || '';
+    const L = SPY.L.filter((x) => x.m !== 'OPTIONS');
+    return [
+      'PRISMA · DIAGNÓSTICO "O SGQ MUDOU" · versão ' + VERSAO + ' · ' + new Date().toLocaleString('pt-BR'),
+      'Obra: ' + (CFG.obraNome || '') + ' (idObra ' + CFG.idObra + ') · tela: ' + location.href.replace(/[?#].*$/, ''),
+      'Servidor que o Prisma usa: ' + API + ' · sessão da tela capturada: ' + (sessaoDaTela() ? 'sim' : 'NÃO'),
+      'Servidores que a tela chamou com login: ' + (Object.entries(SPY.hosts).map(([h, n]) => h + ' (' + n + 'x)').join(', ') || 'nenhum visto'),
+      '', '=== TESTE DAS ROTAS DO PRISMA (só leitura) ===',
+      ...(TESTE ? TESTE.R.map((x) => `- ${x.nome} · ${x.rota} → ${x.st}\n    campos: ${x.chaves}\n    amostra: ${x.amostra}`) : ['(não rodado)']),
+      '', `=== O QUE A TELA DO SGQ FEZ ENQUANTO GRAVAVA (${L.length} chamadas) ===`,
+      ...L.map((x, i) => `#${i + 1} ${x.t.slice(11, 19)} ${x.m} ${x.u} → ${x.st}${x.b ? '\n    enviou: ' + x.b : ''}${x.r ? '\n    voltou: ' + x.r.slice(0, 1200) : ''}`),
+    ].join('\n');
+  }
+  function diagSgqHtml() {
+    const n = SPY.L.filter((x) => x.m !== 'GET').length;
+    return `<div class="card topo" style="max-width:720px;margin-top:14px" id="k-sgq"><h4>Diagnóstico: o SGQ mudou</h4>
+      <div class="nota">Quando o SGQ é atualizado e algo do Prisma para de funcionar (ex.: ocorrência não é criada), faça os 3 passos e mande o texto para o Claude, que ajusta o Prisma. Senha e login não vão no texto.</div>
+      <div class="row"><b>1.</b><button class="b" id="k-sgq-teste">Testar as rotas do Prisma (só leitura)</button><span class="muted">${TESTE ? 'testado às ' + new Date(TESTE.quando).toLocaleTimeString('pt-BR') + ' · ' + TESTE.R.filter((x) => !ok2xx(x.st)).length + ' com problema' : 'ainda não testado'}</span></div>
+      <div class="row"><b>2.</b>${SPY.ativo ? `<button class="b w" id="k-sgq-para">Parar a gravação</button><span class="muted">Gravando: ${SPY.L.length} chamada(s), ${n} gravação(ões). Feche o Prisma e faça NA TELA DO SGQ: criar uma ocorrência (com descrição e tratativa), abrir uma verificação, marcar itens e salvar, encerrar, finalizar e reabrir uma FVS. Depois volte aqui e pare.</span>` : `<button class="b p" id="k-sgq-grava">Começar a gravar a tela do SGQ</button><span class="muted">${SPY.L.length ? SPY.L.length + ' chamada(s) gravadas' : 'nada gravado'}</span>`}</div>
+      <div class="row"><b>3.</b><button class="b p" id="k-sgq-copia" ${TESTE || SPY.L.length ? '' : 'disabled'}>Copiar relatório para mandar ao Claude</button><button class="b" id="k-sgq-limpa" ${SPY.L.length ? '' : 'disabled'}>Apagar gravação</button></div>
+      <textarea id="k-sgq-txt" readonly style="position:absolute;left:-9999px"></textarea></div>`;
+  }
+  function ligarDiagSgq() {
+    const on = (id, fn) => { const e = $(id); if (e) e.onclick = fn; };
+    on('#k-sgq-teste', async () => { if (ocupado()) return; LENDO = true; try { await testarRotas(); } catch (e) { status('Erro no teste: ' + e.message); } LENDO = false; render(); });
+    on('#k-sgq-grava', () => { SPY.ativo = true; SPY.L = []; LS.set('espiao', SPY); status('Gravando. Feche o Prisma, faça as ações na tela do SGQ e volte para parar.'); render(); });
+    on('#k-sgq-para', () => { SPY.ativo = false; LS.set('espiao', SPY); status('Gravação parada: ' + SPY.L.length + ' chamada(s).'); render(); });
+    on('#k-sgq-limpa', () => { SPY.L = []; SPY.ativo = false; LS.set('espiao', SPY); render(); });
+    on('#k-sgq-copia', async () => {
+      const txt = relatorioSgq();
+      try { await navigator.clipboard.writeText(txt); status('Relatório copiado (' + Math.round(txt.length / 1024) + ' KB). Cole na conversa com o Claude.'); }
+      catch (e) { const t = $('#k-sgq-txt'); t.value = txt; t.select(); document.execCommand('copy'); status('Relatório copiado. Cole na conversa com o Claude.'); }
+    });
+  }
   function renderCfg() {
     const body = $('#bf2-body');
     let funcs = []; try { funcs = JSON.parse(localStorage.getItem('funcionarios-dropdown') || '[]'); } catch (e) {}
@@ -2366,7 +2460,8 @@
       <details><summary>Avançado</summary><label style="margin-top:8px;max-width:240px">Pausa entre consultas ao SGQ (ms)<input id="k-pausa" type="number" min="200" value="${esc(CFG.pausaMs)}"></label>
         <label style="margin-top:8px;max-width:340px">Campo do SGQ onde vai o local de uma nova verificação<select id="k-campo">${[1, 2, 3, 4].map((n) => `<option value="${n}" ${+CFG.campoLocal === n ? 'selected' : ''}>Campo ${n}</option>`).join('')}</select></label>
         <label style="margin-top:8px;max-width:340px">Consultas ao mesmo tempo ao ler mapa e relatórios (1 a 6; gravar é sempre uma por vez)<input id="k-par" type="number" min="1" max="6" value="${esc(CFG.leiturasJuntas || 3)}"></label></details>
-      <div class="row"><button class="b p" id="k-salva">Salvar configuração</button><button class="b" id="k-reset">Voltar ao padrão</button></div></div>${perfilHtml()}`;
+      <div class="row"><button class="b p" id="k-salva">Salvar configuração</button><button class="b" id="k-reset">Voltar ao padrão</button></div></div>${configurado() ? diagSgqHtml() : ''}${perfilHtml()}`;
+    ligarDiagSgq();
     // "Salvar perfil" com a configuração ainda não salva para esta obra (ex.: gerou o diagnóstico antes de salvar):
     // salva a configuração sozinho com o que está na tela e segue, em vez de mandar a pessoa voltar lá em cima.
     ligarPerfil(async (D) => {
